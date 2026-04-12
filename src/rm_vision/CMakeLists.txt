@@ -19,10 +19,22 @@ include_directories(
   ${OpenCV_INCLUDE_DIRS}
 )
 
-set(DAHENG_INCLUDE_DIR /home/aa/rm_camera/sdk/Galaxy_camera/inc)
-set(DAHENG_LIB_DIR /home/aa/rm_camera/sdk/Galaxy_camera/lib/x86_64)
+# 【关键】设置大恒SDK路径
+set(DAHENG_SDK_PATH "/home/aa/rm_camera/sdk/Galaxy_camera")
+set(DAHENG_INCLUDE_DIR "${DAHENG_SDK_PATH}/inc")
+set(DAHENG_LIB_DIR "${DAHENG_SDK_PATH}/lib/x86_64")
+
 include_directories(${DAHENG_INCLUDE_DIR})
-link_directories(${DAHENG_LIB_DIR})
+include_directories(
+  ${DAHENG_INCLUDE_DIR}
+  "/home/aa/rm_camera/sdk/Galaxy_camera/sample/GxSingleCamColor"
+)
+
+# 【关键】直接定义库文件的绝对路径
+set(DAHENG_LIBS
+  "${DAHENG_LIB_DIR}/libgxiapi.so"
+  "${DAHENG_LIB_DIR}/liblog4cplus_gx.so"
+)
 
 add_executable(armor_detector_node src/armor_detector_node.cpp src/Camera.cpp src/Pnp.cpp)
 add_executable(kalman_node src/kalman_node.cpp src/kalmanfilter.cpp)
@@ -31,7 +43,7 @@ add_executable(serial_node src/serial_node.cpp )
 target_include_directories(armor_detector_node PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>)
-target_compile_features(armor_detector_node PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
+target_compile_features(armor_detector_node PUBLIC c_std_99 cxx_std_17)
 ament_target_dependencies(
   armor_detector_node
   "rclcpp"
@@ -54,10 +66,11 @@ ament_target_dependencies(
   "serial_driver"
 )
 
+# 【关键】直接链接绝对路径的库文件
 target_link_libraries(armor_detector_node
-  libgxiapi.so          # 注意是小写！
-  liblog4cplus_gx.so    # 这是日志库，也加上
-  # 如果找到了图像处理库，也加在这里，比如 libdximageproc.so
+  ${DAHENG_LIBS}
+  pthread
+  ${OpenCV_LIBS}
 )
 
 install(TARGETS armor_detector_node kalman_node serial_node
@@ -70,12 +83,7 @@ install(
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()

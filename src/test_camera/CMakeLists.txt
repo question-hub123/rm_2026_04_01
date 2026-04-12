@@ -15,6 +15,7 @@ find_package(std_msgs REQUIRED)
 find_package(armor_interfaces REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(serial_driver REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc highgui ml)
 
 include_directories(
   include
@@ -29,8 +30,8 @@ link_directories(${MVSDK_LIB_DIR})
 
 add_executable(image_publisher src/image_publisher.cpp src/Camera.cpp)
 add_executable(visualizer_node src/visualizer_node.cpp)
-add_executable(armor_detector_node src/armor_detector_node.cpp src/Pnp.cpp src/Camera.cpp src/KalmanFilter.cpp)
-add_executable(kalman_node src/kalman_node.cpp src/KalmanFilter.cpp)
+add_executable(armor_detector_node src/armor_detector_node.cpp src/Pnp.cpp src/Camera.cpp)
+add_executable(kalman_node src/kalman_node.cpp src/KalmanFilter.cpp src/AngleKalman.cpp)
 add_executable(serial_node src/serial_node.cpp)
 
 target_include_directories(image_publisher PUBLIC
@@ -93,6 +94,7 @@ target_link_libraries(image_publisher libMVSDK.so)
 target_link_libraries(armor_detector_node libMVSDK.so)
 target_link_libraries(armor_detector_node Eigen3::Eigen)
 target_link_libraries(kalman_node Eigen3::Eigen)
+target_link_libraries(armor_detector_node ${OpenCV_LIBRARIES})
 
 install(TARGETS image_publisher visualizer_node armor_detector_node kalman_node serial_node
   DESTINATION lib/${PROJECT_NAME})

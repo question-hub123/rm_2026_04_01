@@ -25,7 +25,7 @@ public:
 private:
     struct TargetInfo {
         KF kf;                       // 卡尔曼滤波器
-        rclcpp::Time last_time;      // 上次更新时间
+        rclcpp::Time last_update_time;      // 上次更新时间
         bool active;                 // 是否有效（暂时无用，可扩展）
     };
 
@@ -58,12 +58,12 @@ private:
 
             // 已存在目标：预测 + 更新
             TargetInfo& target = it->second;
-            double dt = (now - target.last_time).seconds();
+            double dt = (now - target.last_update_time).seconds();
             if (dt > 0.0 && dt < 0.5) {   // 防止异常时间跳变
                 target.kf.predict(dt);
             }
             target.kf.update(raw.position.x, raw.position.y, raw.yaw);
-            target.last_time = now;
+            target.last_update_time = now;
 
             // 获取滤波后的状态
             double fx, fy, vx, vy, fyaw;
@@ -83,7 +83,7 @@ private:
         // 清理长时间未更新的目标（例如超过2秒）
         auto now_clean = this->now();
         for (auto it = targets_.begin(); it != targets_.end(); ) {
-            if ((now_clean - it->second.last_time).seconds() > 2.0) {
+            if ((now_clean - it->second.last_update_time).seconds() > 2.0) {
                 it = targets_.erase(it);
             } else {
                 ++it;

@@ -23,6 +23,8 @@ public:
                        double& pitch,
                        double& distance) const;
 
+    cv::Mat getCamera_matrix_(){ return camera_matrix_; }
+
 private:
     cv::Mat camera_matrix_;          // 相机内参矩阵
     cv::Mat dist_coeffs_;            // 畸变系数

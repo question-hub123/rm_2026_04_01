@@ -1,7 +1,10 @@
+#include <cmath>
 #include <memory>
+#include <opencv2/core/cvstd_wrapper.hpp>
 #include <opencv2/core/persistence.hpp>
 #include <opencv2/core/types.hpp>
 #include <opencv2/highgui.hpp>
+#include <opencv2/objdetect.hpp>
 #include <rclcpp/time.hpp>
 #include <string>
 #include <vector>
@@ -10,6 +13,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/point.hpp>
+#include <opencv2/ml.hpp>
 
 #include "armor_interfaces/msg/armor.hpp"
 #include "armor_interfaces/msg/armor_array.hpp"
@@ -38,6 +42,13 @@ public:
 
         pub_ = this->create_publisher<armor_interfaces::msg::ArmorArray>("armor_msgs", 10);
         timer_ = this->create_wall_timer(33ms, std::bind(&ArmorDetctor::timer_callback,this));
+
+        std::string model_path = "/home/aa/svm_train/armor_svm_pixel.xml";
+        if(!initDigitRecognizer(model_path))
+        {
+            RCLCPP_WARN(this->get_logger(), "SVM 数字识别模型加载失败，将不显示数字");
+
+        }
     }
 
 private:
@@ -47,6 +58,80 @@ private:
     std::unique_ptr<Tool> tool_;
     std::unique_ptr<PnpSolver> pnpsolver_;
     std::unique_ptr<CameraWrapper> camera_;
+
+    //数字识别功能
+    cv::Ptr<cv::ml::SVM> svm_;
+    cv::HOGDescriptor hog_;//HOG特征提取器
+    bool svm_loaded_ = false;
+    const cv::Size TARGET_SIZE = cv::Size(28,28);
+
+    //初始化模型
+    bool initDigitRecognizer(const std::string& model_path)
+    {
+        try 
+        {
+            svm_ = cv::ml::SVM::load(model_path);
+            if (svm_.empty()) 
+            {
+                RCLCPP_ERROR(this->get_logger(), "无法加载 SVM 模型: %s", model_path.c_str());
+                return false;
+            }
+
+            // 初始化 HOG 描述子（参数必须与 Python 训练时一致）
+            hog_ = cv::HOGDescriptor(
+                TARGET_SIZE,           // winSize
+                cv::Size(14, 14),      // blockSize
+                cv::Size(7, 7),        // blockStride
+                cv::Size(7, 7),        // cellSize
+                9                      // nbins
+            );
+
+            svm_loaded_ = true;
+            RCLCPP_INFO(this->get_logger(), "SVM 数字识别模型加载成功");
+            return true;
+        } 
+        catch (const cv::Exception& e) 
+        {
+            RCLCPP_ERROR(this->get_logger(), "加载 SVM 异常: %s", e.what());
+            return false;
+        }
+    }
+
+
+    int recognizeDigit(const cv::Mat& frame, const std::vector<cv::Point2f>& corners)
+    {
+        if (!svm_loaded_ || corners.size() != 4) return -1;
+
+        // ========== 固定留白透视变换（与训练完全一致） ==========
+        std::vector<cv::Point2f> dst_pts = {
+            cv::Point2f(5, 35),   // 左下
+            cv::Point2f(5, 5),    // 左上
+            cv::Point2f(35, 5),   // 右上
+            cv::Point2f(35, 35)   // 右下
+        };
+        std::vector<cv::Point2f> ordered_corners = {
+            corners[3], corners[0], corners[1], corners[2]
+        };
+
+        cv::Mat M = cv::getPerspectiveTransform(ordered_corners, dst_pts);
+        cv::Mat roi;
+        cv::warpPerspective(frame, roi, M, cv::Size(40, 40));
+
+        // ========== 预处理（固定阈值二值化） ==========
+        cv::Mat gray, binary;
+        cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
+        cv::threshold(gray, binary, 20, 255, cv::THRESH_BINARY_INV);  // 阈值 20 与训练一致
+
+        // ========== 特征提取（展平像素） ==========
+        cv::Mat feature = binary.reshape(1, 1);   // 1 行，自动计算列数
+        feature.convertTo(feature, CV_32FC1);
+
+        // ========== SVM 预测 ==========
+        float response = svm_->predict(feature);
+        return static_cast<int>(response);
+    }
+
+
 
     struct DetectedArmor
     {
@@ -105,27 +190,32 @@ private:
                 da.x = tvec.at<double>(0) * 1000.0;   // mm
                 da.y = tvec.at<double>(1) * 1000.0;
                 da.z = tvec.at<double>(2) * 1000.0;
-                da.yaw = yaw;
-                da.pitch = pitch;
+
+                double yaw_target = std::atan2(tvec.at<double>(0),tvec.at<double>(2));
+                double pitch_target = std::atan2(tvec.at<double>(1),tvec.at<double>(2));
+
+                da.yaw = yaw_target;
+                da.pitch = pitch_target;
                 da.rvec = rvec;
                 da.tvec = tvec;
                 da.valid = true;
                 detections.push_back(da);
-
-                /*
-                cv::putText(img, "Yaw: " + std::to_string(yaw), cv::Point2f(10, 30),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-		        cv::putText(img, "Pitch: " + std::to_string(pitch), cv::Point2f(10, 80),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-		        cv::putText(img, "Distance: " + std::to_string(distance), cv::Point2f(10, 130),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-                */
-
+                
                 cv::Point2f center = (corners[0] + corners[2]) / 2.0f;
 
-                int test_y = -60;
+                int digit = recognizeDigit(img, corners);
+                if(digit != -1)
+                {
+                    cv::putText(img, "Type : " + std::to_string(digit), center + cv::Point2f(-150, -150) , cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+                }
+
+
+                int test_y = -100;
                 cv::Point text_pos(center.x - 80, center.y + test_y);
 
-                cv::putText(img, "Yaw: " + std::to_string(yaw), text_pos,cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-                cv::putText(img, "Pitch: " + std::to_string(pitch), text_pos + cv::Point(0,25),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-                cv::putText(img, "Distance: " + std::to_string(distance), text_pos + cv::Point(0,50),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+                cv::putText(img, "Yaw: " + std::to_string(yaw_target), text_pos,cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+                cv::putText(img, "Pitch: " + std::to_string(pitch_target), text_pos + cv::Point(0,50),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+                cv::putText(img, "Distance: " + std::to_string(distance), text_pos + cv::Point(0,75),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
             }
             else
             {
@@ -228,14 +318,14 @@ private:
             if (!detections[i].corners.empty())
             {
                 cv::Point2f center = (detections[i].corners[0] + detections[i].corners[2]) / 2.0;
-                cv::putText(img, "ID: " + std::to_string(assigned_ids[i]), center, cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 0, 255), 3);
+                cv::putText(img, "ID: " + std::to_string(assigned_ids[i]), center, cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 0, 255), 2);
             }
         }
         
         prev_targets_ = curr_targets;
 
         cv::imshow("aa",img);
-        cv::imshow("bb",mask2);
+        //cv::imshow("bb",mask2);
         cv::waitKey(1);
         pub_->publish(armor_array_msg);
     }

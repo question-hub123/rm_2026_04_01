@@ -18,7 +18,7 @@ public:
         cv::Mat hsv;
         cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
         cv::Mat blue_mask;
-        cv::inRange(hsv, cv::Scalar(89, 100, 80), cv::Scalar(90, 255, 255), blue_mask);
+        cv::inRange(hsv, cv::Scalar(89, 100, 100), cv::Scalar(100, 255, 255), blue_mask);
 
         cv::Mat white_mask;
         cv::inRange(hsv, cv::Scalar(0, 0, 200), cv::Scalar(180, 30, 255), white_mask);
@@ -32,6 +32,7 @@ public:
         cv::Mat final_mask; 
         cv::bitwise_and(blue_mask, mask, final_mask);
         mask2 = final_mask;
+
 
 		std::vector<std::vector<cv::Point>>contours;
 		std::vector<std::vector<cv::Point>>final_contours;
@@ -55,8 +56,8 @@ public:
         cv::Mat red_mask;
         cv::Mat mask_low, mask_high;
 
-        cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(85, 255, 255), mask_low);
-        cv::inRange(hsv, cv::Scalar(140, 0, 0), cv::Scalar(180, 255, 255), mask_high);
+        cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(125, 255, 255), mask_low);
+        cv::inRange(hsv, cv::Scalar(100, 0, 0), cv::Scalar(180, 255, 255), mask_high);
 
         /*cv::inRange(hsv, cv::Scalar(0, 50, 0), cv::Scalar(45, 255, 255), mask_low);
         cv::inRange(hsv, cv::Scalar(100, 70, 100), cv::Scalar(180, 255, 255), mask_high);*/
@@ -85,7 +86,7 @@ public:
 		for (size_t i = 0; i < contours.size(); ++i)
 		{
 			double area = cv::contourArea(contours[i]);
-			if (area < 25) continue;
+			if (area < 35) continue;
 			cv::Rect rect = cv::boundingRect(contours[i]);
 			cv::Point2f rect_center(rect.x + rect.width / 2, rect.y + rect.height / 2);
 			cv::drawContours(img, contours, i, cv::Scalar(0, 255, 0), 2);
@@ -116,7 +117,7 @@ public:
             float ratio1 = h1 / w1;
             // 长宽比过滤，排除明显不是灯条的轮廓
             //if (ratio1 < 0.5 || ratio1 > 25.0) continue;
-            if(ratio1 < 0.22 || ratio1 > 25.0) continue;
+            if(ratio1 < 3.4 || ratio1 > 25.0) continue;
 
             for (size_t j = i + 1; j < contours.size(); ++j) {
                 if (used[j]) continue;
@@ -125,7 +126,7 @@ public:
                 float h2 = std::max(r2.size.width, r2.size.height);
                 float w2 = std::min(r2.size.width, r2.size.height);
                 float ratio2 = h2 / w2;
-                if (ratio2 < 0.22 || ratio2 > 25.0) continue;
+                if (ratio2 < 3.4 || ratio2 > 25.0) continue;
 
                 float avg_h = (h1 + h2) / 2.0f;
 
@@ -133,11 +134,16 @@ public:
                 //if (std::abs(h1 - h2) > avg_h * 1.75f) continue;
 
                 // Y方向中心点偏差不能太大
-                if (std::abs(r1.center.y - r2.center.y) > avg_h * 5.5f) continue;
+                if (std::abs(r1.center.y - r2.center.y) > avg_h * 0.75f) continue;
 
                 // 水平距离应在合理范围内（1.2倍到5倍平均高度）
                 float x_diff = std::abs(r1.center.x - r2.center.x);
-                if (x_diff < avg_h * 1.0f || x_diff > avg_h * 10.0f) continue;
+                if (x_diff < avg_h * 1.5f || x_diff > avg_h * 10.0f) continue;
+
+                //倾斜度
+                double angle1 = r1.angle;
+                double angle2 = r2.angle;
+                //if(std::abs(angle1 - angle2) > 50.5f) continue;
 
                 // 通过所有条件，配对成功
                 armorGroups.emplace_back(i, j);
@@ -171,7 +177,7 @@ public:
             bottomRight = (rightPts[2] + rightPts[3]) / 2.0f;
 
             // 可选：向心收缩（与 drawRect 一致）
-            const float SHRINK_RATIO = 0.90f;
+            const float SHRINK_RATIO = 0.80f;
             auto shrink = [SHRINK_RATIO](cv::Point2f& top, cv::Point2f& bottom) {
                 cv::Point2f center = (top + bottom) / 2.0f;
                 top = center + (top - center) * SHRINK_RATIO;
@@ -194,5 +200,100 @@ public:
         }
 
         return armorCorners;
+    }
+
+
+    void drawBoard(cv::Mat& img, const cv::Mat rvec, const cv::Mat tvec)//重投影
+    {
+        cv::Mat camera_matrix =(cv::Mat_<double>(3,3) <<
+            2374.54248, 0.0,        698.85288,
+            0.0,        2377.53648, 520.8649,
+            0.0,        0.0,        1.0);
+
+        cv::Mat dist_coeffs_ = (cv::Mat_<double>(1,5) <<
+            -0.059743, 0.355479, -0.000625, 0.001595, 0.000000);
+
+        double r = 1000;
+        float armor_width = 0.095;   // 95mm
+        float armor_height = 0.085;  // 85mm
+
+        cv::Mat R;
+        cv::Rodrigues(rvec, R);                    // R 是 3x3 旋转矩阵
+
+        // ==================== Step 2: 提取法向量 n 和向上向量 u ====================
+        cv::Mat z_obj = (cv::Mat_<double>(3, 1) << 0, 0, 1);
+        cv::Mat n = R * z_obj;                     // 外法向量（指向车辆外侧）
+        n /= cv::norm(n);                          // 归一化（理论上已是单位向量）
+
+        cv::Mat y_obj = (cv::Mat_<double>(3, 1) << 0, 1, 0);
+        cv::Mat u = R * y_obj;                     // 车辆向上向量（作为旋转轴）
+        u /= cv::norm(u);
+
+        // ==================== Step 3: 计算车辆几何中心 t_car ====================
+        cv::Mat t_car = tvec - r * n;
+
+        // ==================== Step 4: 当前偏移向量 v ====================
+        cv::Mat v = r * n;                         // v = tvec - t_car
+
+        // ==================== Step 5: 准备装甲板本地 4 个角点（物体坐标系 z=0） ====================
+        std::vector<cv::Point3f> obj_corners = {
+            {-armor_width/2, -armor_height/2, 0.0},
+            { armor_width/2, -armor_height/2, 0.0},
+            { armor_width/2,  armor_height/2, 0.0},
+            {-armor_width/2,  armor_height/2, 0.0}
+        };
+
+        // 存储 4 块装甲板的 pose（第 0 块是当前真实检测到的）
+        std::vector<cv::Mat> all_rvec(4), all_tvec(4);
+        all_rvec[0] = rvec.clone();
+        all_tvec[0] = tvec.clone();
+
+        // ==================== Step 6: 生成另外 3 块（旋转 90°、180°、270°） ====================
+        for (int k = 1; k < 4; ++k) {
+            double theta = k * CV_PI / 2.0;        // 90°、180°、270°（弧度）
+
+            // 构造绕 u 轴旋转 theta 的旋转矩阵
+            cv::Mat rvec_theta = theta * u;        // rvec = theta * 单位轴向量
+            cv::Mat Rot_theta;
+            cv::Rodrigues(rvec_theta, Rot_theta);
+
+            // R_k = Rot_theta * R
+            cv::Mat R_k = Rot_theta * R;
+            cv::Mat rvec_k;
+            cv::Rodrigues(R_k, rvec_k);
+
+            // v_k = Rot_theta * v
+            cv::Mat v_k = Rot_theta * v;
+
+            // t_k = t_car + v_k
+            cv::Mat t_k = t_car + v_k;
+
+            all_rvec[k] = rvec_k;
+            all_tvec[k] = t_k;
+        }
+
+        // ==================== Step 7: 对 4 块装甲板全部重投影并绘制 ====================
+        for (int i = 0; i < 4; ++i) {
+            std::vector<cv::Point2f> img_points;
+            cv::projectPoints(obj_corners,
+                            all_rvec[i],
+                            all_tvec[i],
+                            camera_matrix,
+                            dist_coeffs_,
+                            img_points);
+
+            // 转成整数点
+            std::vector<cv::Point> poly;
+            for (auto& p : img_points) {
+                poly.emplace_back(cv::Point(cvRound(p.x), cvRound(p.y)));
+            }
+
+            // 绘制四边形（当前检测的用绿色，其他用黄色）
+            cv::Scalar color = (i == 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 255, 255);
+            cv::polylines(img, poly, true, color, 3, cv::LINE_AA);
+
+            // 可选：画装甲板中心点（小圆点）
+            cv::circle(img, poly[0] /* 任意角点或单独投影(0,0,0) */, 5, color, -1);
+        }
     }
 };

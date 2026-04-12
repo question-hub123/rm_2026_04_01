@@ -3,6 +3,9 @@
 #include "serial_driver/serial_driver.hpp"
 #include "cstring"
 #include "opencv2/opencv.hpp"
+#include <cstdint>
+#include <thread>
+#include <vector>
 
 #define TX_FRAME_LEN 10
 #define HEAD 0x00
@@ -18,7 +21,8 @@ public:
         const std::string port = "/dev/ttyUSB0";
         const int baud = 115200;
 
-        try {
+        try 
+        {
             owned_ctx_ = std::make_unique<IoContext>(2);
             serial_driver_ = std::make_unique<drivers::serial_driver::SerialDriver>(*owned_ctx_);
             
@@ -30,16 +34,20 @@ public:
             );
             
             serial_driver_->init_port(port, config);
-            if (!serial_driver_->port()->is_open()) {
+            if (!serial_driver_->port()->is_open()) 
+            {
                 serial_driver_->port()->open();
             }
             
             RCLCPP_INFO(this->get_logger(), "串口初始化成功！");
-        } catch (const std::exception& e) {
+        } 
+        catch (const std::exception& e) 
+        {
             RCLCPP_ERROR(this->get_logger(), "串口打开失败：%s", e.what());
             return;
         }
 
+        
         sub_ = this->create_subscription<armor_interfaces::msg::ArmorArray>(
             "armor_msgs_filtered", 10,
             std::bind(&SerialNode::callback, this, std::placeholders::_1)
@@ -60,6 +68,8 @@ private:
     rclcpp::Subscription<armor_interfaces::msg::ArmorArray>::SharedPtr sub_;
     std::unique_ptr<IoContext> owned_ctx_;
     std::unique_ptr<drivers::serial_driver::SerialDriver> serial_driver_;
+    std::thread receive_thread_;
+    bool is_running_ = true;
 
     void callback(armor_interfaces::msg::ArmorArray::SharedPtr msg)
     {
@@ -89,6 +99,41 @@ private:
 
         RCLCPP_INFO(this->get_logger(), "yaw_deg=%.2f, pitch_deg=%.2f", yaw_deg, pitch_deg);
     }
+
+    void receive_loop()
+    {
+        uint8_t buffer[128];
+
+        while (is_running_ && rclcpp::ok())
+        {
+            if (!serial_driver_ || !serial_driver_->port()->is_open()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+
+            try 
+            {
+                std::vector<uint8_t> data;
+                serial_driver_->port()->receive(data);
+                
+                if(!data.empty())
+                {
+                    std::string hex_str;
+                    for (uint8_t byte : data)
+                    {
+                        char temp[8];
+                        snprintf(temp, sizeof(temp), "%02X ", byte);
+                        hex_str += temp;
+                    }
+                    RCLCPP_INFO(this->get_logger(), "📩 回传数据：%s", hex_str.c_str());
+                }
+            } 
+            catch (...) {}
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+
 };
 
 int main(int argc, char * argv[])

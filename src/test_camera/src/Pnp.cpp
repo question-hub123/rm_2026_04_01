@@ -1,6 +1,7 @@
 #include "Pnp.hpp"
 #include <opencv2/calib3d.hpp>
 #include <cmath>
+#include <opencv2/core/mat.hpp>
 
 PnpSolver::PnpSolver()
 {
@@ -15,8 +16,8 @@ PnpSolver::PnpSolver()
         -0.059743, 0.355479, -0.000625, 0.001595, 0.000000);
 
     // 硬编码装甲板尺寸（米）
-    double armor_width = 0.135;   // 135mm
-    double armor_height = 0.055;  // 55mm
+    double armor_width = 0.095;   // 95mm
+    double armor_height = 0.095;  // 85mm
     setArmorSize(armor_width, armor_height);
 }
 
