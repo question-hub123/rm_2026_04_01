@@ -1,7 +1,9 @@
 #include <rclcpp/logging.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp/time.hpp>
 #include <unordered_map>
 #include <string>
+#include <unordered_set>
 #include "armor_interfaces/msg/armor.hpp"
 #include "armor_interfaces/msg/armor_array.hpp"
 #include "Kalman.hpp"
@@ -26,7 +28,13 @@ private:
     struct TargetInfo {
         KF kf;                       // 卡尔曼滤波器
         rclcpp::Time last_update_time;      // 上次更新时间
-        bool active;                 // 是否有效（暂时无用，可扩展）
+        rclcpp::Time last_predict_time;
+        int lost_count;
+        double last_yaw;
+        double last_pitch;
+        double last_yaw_rate;
+        double last_pitch_rate;
+        bool initialized;
     };
 
     std::unordered_map<int, TargetInfo> targets_;  // 每个 ID 的跟踪目标
@@ -40,47 +48,95 @@ private:
         armor_interfaces::msg::ArmorArray filtered_msg;
         filtered_msg.header = msg->header;      // 复制原始头（时间戳、frame_id）
 
-        // 对每个装甲板进行处理
-        for (const auto& raw : msg->armors) {
-            int id = raw.id;
-            auto it = targets_.find(id);
+        for(auto& pair : targets_)
+        {
+            auto& target = pair.second;
+            if(!target.initialized) continue;
+            double dt = (now - target.last_predict_time).seconds();
+            if(dt > 0.0 && dt < 0.5) target.kf.predict(dt);
 
-            if (it == targets_.end()) {
-                // 新目标：初始化滤波器
-                KF kf(0.033);   // 默认 dt，实际预测时会用动态 dt
-                kf.init(raw.position.x, raw.position.y, raw.yaw);
-                TargetInfo info = {kf, now, true};
-                targets_[id] = info;
-                // 第一帧直接复制原始数据（或直接使用原始值）
-                filtered_msg.armors.push_back(raw);
-                continue;
-            }
-
-            // 已存在目标：预测 + 更新
-            TargetInfo& target = it->second;
-            double dt = (now - target.last_update_time).seconds();
-            if (dt > 0.0 && dt < 0.5) {   // 防止异常时间跳变
-                target.kf.predict(dt);
-            }
-            target.kf.update(raw.position.x, raw.position.y, raw.yaw);
-            target.last_update_time = now;
-
-            // 获取滤波后的状态
-            double fx, fy, vx, vy, fyaw;
-            target.kf.getState(fx, fy, vx, vy, fyaw);
-
-            // 构造滤波后的消息（复制原始消息，替换滤波字段）
-            armor_interfaces::msg::Armor filtered;
-            filtered = raw;                     // 复制角点、旋转向量、原始角度等
-            filtered.position.x = fx;           // 使用滤波后的位置
-            filtered.position.y = fy;
-            filtered.yaw_filtered = fyaw;       // 滤波后的 yaw
-            filtered_msg.armors.push_back(filtered);
-
-            RCLCPP_INFO(this->get_logger(),"Yaw_filtered = %lf",fyaw);
+            target.last_predict_time = now;
         }
 
-        // 清理长时间未更新的目标（例如超过2秒）
+        std::unordered_set<int> updated_ids;
+        for(const auto& raw : msg->armors)
+        {
+            int id = raw.id;
+            updated_ids.insert(id);
+            auto it = targets_.find(id);
+
+            if(it == targets_.end())
+            {
+                KF kf;
+                kf.init(raw.yaw, raw.pitch);
+                TargetInfo info;
+                info.kf = kf;
+                info.last_update_time = now;
+                info.last_predict_time = now;
+                info.lost_count = 0;
+                info.initialized = true;
+                info.last_pitch = raw.pitch;
+                info.last_yaw = raw.yaw;
+                targets_[id] = info;
+
+                auto filtered = raw;
+                filtered.yaw_filtered = raw.yaw;
+                filtered.pitch_filtered = raw.pitch;
+                filtered.is_predict = false;
+                filtered_msg.armors.push_back(filtered);
+            }
+            else
+            {
+                auto& target = it->second;
+                target.kf.update(raw.yaw, raw.pitch);
+                target.last_update_time = now;
+                target.lost_count = 0;
+
+                // 获取滤波后的状态
+                double fyaw, fyaw_rate, fpitch, fpitch_rate;
+                target.kf.getState(fyaw, fyaw_rate, fpitch, fpitch_rate);
+                target.last_yaw = fyaw;
+                target.last_pitch = fpitch;
+
+                auto filtered = raw;
+                filtered.yaw_filtered = fyaw;
+                filtered.pitch_filtered = fpitch;
+                filtered.is_predict = false;
+                filtered_msg.armors.push_back(filtered);
+            }
+        }
+
+        for (auto& pair : targets_) 
+        {
+            int id = pair.first;
+            auto& target = pair.second;
+            if (!target.initialized) continue;
+
+            // 如果本次没有被更新，则认为是丢失
+            if (updated_ids.find(id) == updated_ids.end()) {
+                target.lost_count++;
+                if (target.lost_count > 10) {   // 连续丢失超过10帧，不再发布
+                    continue;
+                }
+
+                // 获取当前预测状态
+                double fyaw, fyaw_rate, fpitch, fpitch_rate;
+                target.kf.getState(fyaw, fyaw_rate, fpitch, fpitch_rate);
+
+                armor_interfaces::msg::Armor predicted;
+                predicted.id = id;
+                predicted.yaw = fyaw;
+                predicted.pitch = fpitch;
+                predicted.yaw_filtered = fyaw;
+                predicted.pitch_filtered = fpitch;
+                predicted.is_predict = true;    // ★ 标记为预测值
+                // 其他字段（位置、角点）无法预测，保持默认
+
+                filtered_msg.armors.push_back(predicted);
+            }
+        }
+
+        // 第四步：清理长时间未更新的目标（超过2秒）
         auto now_clean = this->now();
         for (auto it = targets_.begin(); it != targets_.end(); ) {
             if ((now_clean - it->second.last_update_time).seconds() > 2.0) {

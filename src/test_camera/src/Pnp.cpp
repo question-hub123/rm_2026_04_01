@@ -38,7 +38,7 @@ bool PnpSolver::solve(const std::vector<cv::Point2f>& image_points,
     if (image_points.size() != 4) return false;
     return cv::solvePnP(object_points_, image_points,
                         camera_matrix_, dist_coeffs_,
-                        rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
+                        rvec, tvec, false, cv::SOLVEPNP_IPPE);
 }
 
 bool PnpSolver::solveWithPose(const std::vector<cv::Point2f>& image_points,

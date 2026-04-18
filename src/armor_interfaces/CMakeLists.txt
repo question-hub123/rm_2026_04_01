@@ -16,6 +16,7 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Armor.msg"
   "msg/ArmorArray.msg"
+  "msg/Serial.msg"
   DEPENDENCIES std_msgs geometry_msgs   # 如果消息中使用了 geometry_msgs 类型
 )
 

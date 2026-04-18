@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdlib>
+#include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/core/types.hpp>
@@ -9,6 +10,7 @@
 #include <opencv2/opencv.hpp>
 #include <rclcpp/logging.hpp>
 #include <vector>
+#include <Eigen/Dense>
 
 class Tool
 {
@@ -18,7 +20,7 @@ public:
         cv::Mat hsv;
         cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
         cv::Mat blue_mask;
-        cv::inRange(hsv, cv::Scalar(89, 100, 100), cv::Scalar(100, 255, 255), blue_mask);
+        cv::inRange(hsv, cv::Scalar(80, 0, 100), cv::Scalar(100, 255, 255), blue_mask);
 
         cv::Mat white_mask;
         cv::inRange(hsv, cv::Scalar(0, 0, 200), cv::Scalar(180, 30, 255), white_mask);
@@ -202,98 +204,167 @@ public:
         return armorCorners;
     }
 
+    /*void drawOtherArmors(cv::Mat& img, const cv::Mat& rvec, const cv::Mat& tvec)
+{
+    // ==================== 参数配置 ====================
+    const double ARMOR_W = 0.135; // 真实装甲板尺寸
+    const double ARMOR_H = 0.125;
+    const double CAR_RADIUS = 0.20; // 根据你的机器人实际微调 (0.12~0.25)
 
-    void drawBoard(cv::Mat& img, const cv::Mat rvec, const cv::Mat tvec)//重投影
-    {
-        cv::Mat camera_matrix =(cv::Mat_<double>(3,3) <<
-            2374.54248, 0.0,        698.85288,
-            0.0,        2377.53648, 520.8649,
-            0.0,        0.0,        1.0);
+    const cv::Mat K = (cv::Mat_<double>(3,3) << 2374.54248, 0.0, 698.85288, 0.0, 2377.53648, 520.8649, 0.0, 0.0, 1.0);
 
-        cv::Mat dist_coeffs_ = (cv::Mat_<double>(1,5) <<
-            -0.059743, 0.355479, -0.000625, 0.001595, 0.000000);
+    // 1. 提取 Yaw (从 PnP 给出的 rvec 提取当前观测板的水平角度)
+    cv::Mat R_cur;
+    cv::Rodrigues(rvec, R_cur);
+    cv::Mat normal = R_cur * (cv::Mat_<double>(3,1) << 0, 0, 1);
+    double yaw = std::atan2(normal.at<double>(0), normal.at<double>(2));
 
-        double r = 1000;
-        float armor_width = 0.095;   // 95mm
-        float armor_height = 0.085;  // 85mm
+    // 2. 计算车体中心 (相机坐标系)
+    // 逻辑：当前板位置 - 半径方向
+    double car_center_cam_x = tvec.at<double>(0) - CAR_RADIUS * std::sin(yaw);
+    double car_center_cam_y = tvec.at<double>(1); // 高度严格不变
+    double car_center_cam_z = tvec.at<double>(2) - CAR_RADIUS * std::cos(yaw);
 
-        cv::Mat R;
-        cv::Rodrigues(rvec, R);                    // R 是 3x3 旋转矩阵
+    // 3. 循环绘制 4 块板
+    for (int i = 0; i < 4; ++i) {
+        // 当前板的角度偏移：0, 90, 180, 270 度
+        double current_yaw = yaw + i * (CV_PI / 2.0);
 
-        // ==================== Step 2: 提取法向量 n 和向上向量 u ====================
-        cv::Mat z_obj = (cv::Mat_<double>(3, 1) << 0, 0, 1);
-        cv::Mat n = R * z_obj;                     // 外法向量（指向车辆外侧）
-        n /= cv::norm(n);                          // 归一化（理论上已是单位向量）
+        // A. 该板的中心点 (相机坐标系)
+        // 逻辑：车体中心 + 半径方向
+        double cx = car_center_cam_x + CAR_RADIUS * std::sin(current_yaw);
+        double cy = car_center_cam_y;
+        double cz = car_center_cam_z + CAR_RADIUS * std::cos(current_yaw);
 
-        cv::Mat y_obj = (cv::Mat_<double>(3, 1) << 0, 1, 0);
-        cv::Mat u = R * y_obj;                     // 车辆向上向量（作为旋转轴）
-        u /= cv::norm(u);
+        // B. 该板的四个角点 (在相机坐标系下构建)
+        // 逻辑：装甲板平面垂直于 current_yaw 方向
+        // 装甲板的横向向量是 (cos(yaw), 0, -sin(yaw))
+        std::vector<cv::Point3d> corners_cam;
+        double cos_y = std::cos(current_yaw);
+        double sin_y = std::sin(current_yaw);
 
-        // ==================== Step 3: 计算车辆几何中心 t_car ====================
-        cv::Mat t_car = tvec - r * n;
+        // 这里的 w_vec 是装甲板平面的左右伸展方向
+        cv::Point3d w_vec(cos_y * (ARMOR_W/2.0), 0, -sin_y * (ARMOR_W/2.0));
+        cv::Point3d h_vec(0, ARMOR_H/2.0, 0);
 
-        // ==================== Step 4: 当前偏移向量 v ====================
-        cv::Mat v = r * n;                         // v = tvec - t_car
+        corners_cam.push_back(cv::Point3d(cx, cy, cz) - w_vec - h_vec); // 左下
+        corners_cam.push_back(cv::Point3d(cx, cy, cz) + w_vec - h_vec); // 右下
+        corners_cam.push_back(cv::Point3d(cx, cy, cz) + w_vec + h_vec); // 右上
+        corners_cam.push_back(cv::Point3d(cx, cy, cz) - w_vec + h_vec); // 左上
 
-        // ==================== Step 5: 准备装甲板本地 4 个角点（物体坐标系 z=0） ====================
-        std::vector<cv::Point3f> obj_corners = {
-            {-armor_width/2, -armor_height/2, 0.0},
-            { armor_width/2, -armor_height/2, 0.0},
-            { armor_width/2,  armor_height/2, 0.0},
-            {-armor_width/2,  armor_height/2, 0.0}
-        };
-
-        // 存储 4 块装甲板的 pose（第 0 块是当前真实检测到的）
-        std::vector<cv::Mat> all_rvec(4), all_tvec(4);
-        all_rvec[0] = rvec.clone();
-        all_tvec[0] = tvec.clone();
-
-        // ==================== Step 6: 生成另外 3 块（旋转 90°、180°、270°） ====================
-        for (int k = 1; k < 4; ++k) {
-            double theta = k * CV_PI / 2.0;        // 90°、180°、270°（弧度）
-
-            // 构造绕 u 轴旋转 theta 的旋转矩阵
-            cv::Mat rvec_theta = theta * u;        // rvec = theta * 单位轴向量
-            cv::Mat Rot_theta;
-            cv::Rodrigues(rvec_theta, Rot_theta);
-
-            // R_k = Rot_theta * R
-            cv::Mat R_k = Rot_theta * R;
-            cv::Mat rvec_k;
-            cv::Rodrigues(R_k, rvec_k);
-
-            // v_k = Rot_theta * v
-            cv::Mat v_k = Rot_theta * v;
-
-            // t_k = t_car + v_k
-            cv::Mat t_k = t_car + v_k;
-
-            all_rvec[k] = rvec_k;
-            all_tvec[k] = t_k;
+        // C. 投影并绘制
+        std::vector<cv::Point2f> img_pts;
+        for (const auto& p : corners_cam) {
+            if (p.z <= 0) continue;
+            float u = K.at<double>(0,0) * p.x / p.z + K.at<double>(0,2);
+            float v = K.at<double>(1,1) * p.y / p.z + K.at<double>(1,2);
+            img_pts.push_back(cv::Point2f(u, v));
         }
 
-        // ==================== Step 7: 对 4 块装甲板全部重投影并绘制 ====================
-        for (int i = 0; i < 4; ++i) {
-            std::vector<cv::Point2f> img_points;
-            cv::projectPoints(obj_corners,
-                            all_rvec[i],
-                            all_tvec[i],
-                            camera_matrix,
-                            dist_coeffs_,
-                            img_points);
-
-            // 转成整数点
-            std::vector<cv::Point> poly;
-            for (auto& p : img_points) {
-                poly.emplace_back(cv::Point(cvRound(p.x), cvRound(p.y)));
-            }
-
-            // 绘制四边形（当前检测的用绿色，其他用黄色）
-            cv::Scalar color = (i == 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 255, 255);
-            cv::polylines(img, poly, true, color, 3, cv::LINE_AA);
-
-            // 可选：画装甲板中心点（小圆点）
-            cv::circle(img, poly[0] /* 任意角点或单独投影(0,0,0) */, 5, color, -1);
+        if (img_pts.size() == 4) {
+            cv::Scalar color = (i == 0) ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 0, 0);
+            for (int j = 0; j < 4; ++j)
+                cv::line(img, img_pts[j], img_pts[(j+1)%4], color, 2);
         }
     }
+}*/
+
+void drawOtherArmors(cv::Mat& img, const cv::Mat& rvec, const cv::Mat& tvec)
+{
+    // ==================== 1. 参数配置 ====================
+    const double ARMOR_W = 0.135; 
+    const double ARMOR_H = 0.125; 
+    const double CAR_RADIUS = 0.20; 
+    const cv::Mat K = (cv::Mat_<double>(3,3) << 2374.54248, 0.0, 698.85288, 0.0, 2377.53648, 520.8649, 0.0, 0.0, 1.0);
+
+    // ==================== 2. 提取状态并平滑 Pitch ====================
+    cv::Mat R_cur;
+    cv::Rodrigues(rvec, R_cur);
+    
+    // 获取 Yaw
+    cv::Mat normal = R_cur * (cv::Mat_<double>(3,1) << 0, 0, 1);
+    double yaw = std::atan2(normal.at<double>(0), normal.at<double>(2));
+
+    // 获取原始的向上向量（包含 Pitch 和 Roll）
+    cv::Mat armor_up_vec = R_cur * (cv::Mat_<double>(3,1) << 0, 1, 0); 
+    double hx = armor_up_vec.at<double>(0);
+    double hy = armor_up_vec.at<double>(1);
+    double hz = armor_up_vec.at<double>(2);
+
+    // --- 【新增：消除 0 Pitch 抖动逻辑】 ---
+    double cos_y = std::cos(yaw);
+    double sin_y = std::sin(yaw);
+
+    // 步骤 A: 将向量反向旋转抵消 Yaw，转入“车体局部坐标系”
+    // 在这个坐标系下，hz_local 纯粹代表前后俯仰，hx_local 纯粹代表左右侧倾
+    double hx_local = cos_y * hx - sin_y * hz;
+    double hz_local = sin_y * hx + cos_y * hz;
+    double hy_local = hy;
+
+    // 步骤 B: 钳制 Pitch（hz_local < 0 代表装甲板顶部远离相机，即上翻）
+    // 设定 0.05 的阈值（大约 3 度），如果在这个范围内抖动，强制锁定为上翻
+    const double PITCH_THRESH = -0.15; 
+    if (std::abs(hz_local) < 0.60) {
+        hz_local = PITCH_THRESH; 
+    }
+
+    // （可选隐藏福利）: 如果你发现重投影有左右倾斜抖动，可以解除下面这行的注释，强制消除侧倾
+    // hx_local = 0.0; 
+
+    // 步骤 C: 重新归一化（防止强制修改后向量长度变化导致框变大/变小）
+    double len = std::sqrt(hx_local*hx_local + hy_local*hy_local + hz_local*hz_local);
+    hx_local /= len; 
+    hy_local /= len; 
+    hz_local /= len;
+
+    // 步骤 D: 带着干净的 Pitch 重新旋转回相机坐标系，作为全局高度向量
+    cv::Point3d global_h_dir(
+        cos_y * hx_local + sin_y * hz_local,
+        hy_local,
+        -sin_y * hx_local + cos_y * hz_local
+    );
+    // ------------------------------------
+
+    // ==================== 3. 计算车体中心 ====================
+    double car_center_cam_x = tvec.at<double>(0) - CAR_RADIUS * std::sin(yaw);
+    double car_center_cam_y = tvec.at<double>(1); 
+    double car_center_cam_z = tvec.at<double>(2) - CAR_RADIUS * std::cos(yaw);
+
+    // ==================== 4. 绘制剩下三块板 ====================
+    for (int i = 1; i <= 3; ++i) { 
+        double current_yaw = yaw + i * (CV_PI / 2.0);
+
+        double cx = car_center_cam_x + CAR_RADIUS * std::sin(current_yaw);
+        double cy = car_center_cam_y;
+        double cz = car_center_cam_z + CAR_RADIUS * std::cos(current_yaw);
+
+        double cur_cos_y = std::cos(current_yaw);
+        double cur_sin_y = std::sin(current_yaw);
+        cv::Point3d w_dir(cur_cos_y, 0, -cur_sin_y); 
+
+        // 使用过滤后的 global_h_dir 代替原来的 h_dir
+        std::vector<cv::Point3d> corners_cam;
+        corners_cam.push_back(cv::Point3d(cx, cy, cz) - w_dir*(ARMOR_W/2.0) - global_h_dir*(ARMOR_H/2.0));
+        corners_cam.push_back(cv::Point3d(cx, cy, cz) + w_dir*(ARMOR_W/2.0) - global_h_dir*(ARMOR_H/2.0));
+        corners_cam.push_back(cv::Point3d(cx, cy, cz) + w_dir*(ARMOR_W/2.0) + global_h_dir*(ARMOR_H/2.0));
+        corners_cam.push_back(cv::Point3d(cx, cy, cz) - w_dir*(ARMOR_W/2.0) + global_h_dir*(ARMOR_H/2.0));
+
+        std::vector<cv::Point2f> img_pts;
+        for (const auto& p : corners_cam) {
+            if (p.z <= 0) continue;
+            float u = K.at<double>(0,0) * p.x / p.z + K.at<double>(0,2);
+            float v = K.at<double>(1,1) * p.y / p.z + K.at<double>(1,2);
+            img_pts.push_back(cv::Point2f(u, v));
+        }
+
+        if (img_pts.size() == 4) {
+            for (int j = 0; j < 4; ++j)
+                cv::line(img, img_pts[j], img_pts[(j+1)%4], cv::Scalar(255, 100, 0), 2);
+        }
+    }
+}
+
+
+    
+    
 };

@@ -1,10 +1,13 @@
 #include <cmath>
+#include <cstddef>
+#include <deque>
 #include <memory>
 #include <opencv2/core/cvstd_wrapper.hpp>
 #include <opencv2/core/persistence.hpp>
 #include <opencv2/core/types.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/objdetect.hpp>
+#include <rclcpp/logging.hpp>
 #include <rclcpp/time.hpp>
 #include <string>
 #include <vector>
@@ -14,6 +17,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <geometry_msgs/msg/point.hpp>
 #include <opencv2/ml.hpp>
+#include <opencv2/dnn.hpp>
 
 #include "armor_interfaces/msg/armor.hpp"
 #include "armor_interfaces/msg/armor_array.hpp"
@@ -22,6 +26,7 @@
 #include "Camera.hpp"
 
 using namespace std::chrono_literals;
+const float CONF_THRESH = 0.0f;
 class ArmorDetctor : public rclcpp::Node
 {
 public:
@@ -38,16 +43,22 @@ public:
             rclcpp::shutdown();
             return;
         }
-        camera_->setExposure(8.0);
+        camera_->setExposure(5.0);
 
         pub_ = this->create_publisher<armor_interfaces::msg::ArmorArray>("armor_msgs", 10);
         timer_ = this->create_wall_timer(33ms, std::bind(&ArmorDetctor::timer_callback,this));
 
-        std::string model_path = "/home/aa/svm_train/armor_svm_pixel.xml";
-        if(!initDigitRecognizer(model_path))
-        {
-            RCLCPP_WARN(this->get_logger(), "SVM 数字识别模型加载失败，将不显示数字");
 
+        std::string model_path = "/home/aa/rm_ws/src/test_camera/src/Zenet-已训练好.onnx";
+        try 
+        {
+            net_ = cv::dnn::readNetFromONNX(model_path);
+            classifier_loaded_ = true;
+            RCLCPP_INFO(this->get_logger(), "ONNX模型加载成功");
+        } 
+        catch (const cv::Exception& e) 
+        {
+            RCLCPP_ERROR(this->get_logger(), "模型加载失败: %s", e.what());
         }
     }
 
@@ -60,75 +71,70 @@ private:
     std::unique_ptr<CameraWrapper> camera_;
 
     //数字识别功能
-    cv::Ptr<cv::ml::SVM> svm_;
-    cv::HOGDescriptor hog_;//HOG特征提取器
-    bool svm_loaded_ = false;
-    const cv::Size TARGET_SIZE = cv::Size(28,28);
+    // 类成员
+    cv::dnn::Net net_;                     // 与原代码 net_ 对应
+    const cv::Size MODEL_INPUT_SIZE = cv::Size(28, 28);
+    bool classifier_loaded_ = false;
 
-    //初始化模型
-    bool initDigitRecognizer(const std::string& model_path)
+
+    int recognizeDigit(const cv::Mat& src, const std::vector<cv::Point2f>& corners)
     {
-        try 
-        {
-            svm_ = cv::ml::SVM::load(model_path);
-            if (svm_.empty()) 
-            {
-                RCLCPP_ERROR(this->get_logger(), "无法加载 SVM 模型: %s", model_path.c_str());
-                return false;
-            }
+        if (net_.empty() || corners.size() != 4) return -1;
 
-            // 初始化 HOG 描述子（参数必须与 Python 训练时一致）
-            hog_ = cv::HOGDescriptor(
-                TARGET_SIZE,           // winSize
-                cv::Size(14, 14),      // blockSize
-                cv::Size(7, 7),        // blockStride
-                cv::Size(7, 7),        // cellSize
-                9                      // nbins
-            );
+        const float vertical_padding_ratio = 0.6f;
 
-            svm_loaded_ = true;
-            RCLCPP_INFO(this->get_logger(), "SVM 数字识别模型加载成功");
-            return true;
-        } 
-        catch (const cv::Exception& e) 
-        {
-            RCLCPP_ERROR(this->get_logger(), "加载 SVM 异常: %s", e.what());
-            return false;
-        }
-    }
+        // ===================== 1. 调整角点顺序以匹配原代码逻辑 =====================
+        // 原代码假设 pnp_corners 顺序为：0左上, 1左下, 2右下, 3右上
+        // 你的 corners 通常为：0左上, 1右上, 2右下, 3左下
+        // 因此需要重新排列
+        std::vector<cv::Point2f> roi_corners(4);
+        roi_corners[0] = corners[0];                 // 左上
+        roi_corners[1] = corners[3];                 // 左下（原代码的1）
+        roi_corners[2] = corners[2];                 // 右下（原代码的2）
+        roi_corners[3] = corners[1];                 // 右上（原代码的3）
 
+        // ===================== 2. 垂直方向扩展 ROI =====================
+        float left_height  = cv::norm(roi_corners[0] - roi_corners[1]);
+        float right_height = cv::norm(roi_corners[3] - roi_corners[2]);
+        float avg_height = (left_height + right_height) / 2.0f;
+        float y_offset = avg_height * vertical_padding_ratio;
 
-    int recognizeDigit(const cv::Mat& frame, const std::vector<cv::Point2f>& corners)
-    {
-        if (!svm_loaded_ || corners.size() != 4) return -1;
+        roi_corners[0].y -= y_offset;
+        roi_corners[3].y -= y_offset;
+        roi_corners[1].y += y_offset;
+        roi_corners[2].y += y_offset;
 
-        // ========== 固定留白透视变换（与训练完全一致） ==========
+        // ===================== 3. 透视变换至 28×28 =====================
         std::vector<cv::Point2f> dst_pts = {
-            cv::Point2f(5, 35),   // 左下
-            cv::Point2f(5, 5),    // 左上
-            cv::Point2f(35, 5),   // 右上
-            cv::Point2f(35, 35)   // 右下
-        };
-        std::vector<cv::Point2f> ordered_corners = {
-            corners[3], corners[0], corners[1], corners[2]
+            {0.0f, 0.0f},
+            {0.0f, (float)MODEL_INPUT_SIZE.height},
+            {(float)MODEL_INPUT_SIZE.width, (float)MODEL_INPUT_SIZE.height},
+            {(float)MODEL_INPUT_SIZE.width, 0.0f}
         };
 
-        cv::Mat M = cv::getPerspectiveTransform(ordered_corners, dst_pts);
-        cv::Mat roi;
-        cv::warpPerspective(frame, roi, M, cv::Size(40, 40));
+        cv::Mat warp_mat = cv::getPerspectiveTransform(roi_corners, dst_pts);
+        cv::Mat roi_for_model;
+        cv::warpPerspective(src, roi_for_model, warp_mat, MODEL_INPUT_SIZE);
 
-        // ========== 预处理（固定阈值二值化） ==========
-        cv::Mat gray, binary;
-        cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
-        cv::threshold(gray, binary, 20, 255, cv::THRESH_BINARY_INV);  // 阈值 20 与训练一致
+        // ===================== 4. 灰度化 =====================
+        cv::Mat gray;
+        cv::cvtColor(roi_for_model, gray, cv::COLOR_BGR2GRAY);
 
-        // ========== 特征提取（展平像素） ==========
-        cv::Mat feature = binary.reshape(1, 1);   // 1 行，自动计算列数
-        feature.convertTo(feature, CV_32FC1);
+        // ===================== 5. 构建 blob 并推理 =====================
+        cv::Mat blob = cv::dnn::blobFromImage(gray, 1.0 / 255.0, MODEL_INPUT_SIZE, cv::Scalar(0), false, false);
+        net_.setInput(blob);
+        cv::Mat prob = net_.forward();
 
-        // ========== SVM 预测 ==========
-        float response = svm_->predict(feature);
-        return static_cast<int>(response);
+        // ===================== 6. 后处理（完全照搬原代码） =====================
+        // 提取分类概率（忽略背景类，取第1列到最后一列对应数字0-9）
+        cv::Mat cls_prob = prob.colRange(1, prob.cols);
+        
+        cv::Point classIdPoint;
+        double confidence;
+        cv::minMaxLoc(cls_prob.reshape(1, 1), nullptr, &confidence, nullptr, &classIdPoint);
+
+        // classIdPoint.x 对应数字 0-9
+        return classIdPoint.x;
     }
 
 
@@ -174,12 +180,6 @@ private:
 
             armor_interfaces::msg::Armor armor_msg;
 
-            for(auto& pt : corners)
-            {
-                geometry_msgs::msg::Point p;
-                p.x = pt.x; p.y = pt.y; p.z = 0.0;
-                armor_msg.corners.push_back(p);
-            }
 
             cv::Mat rvec, tvec;
             double yaw, pitch, distance;
@@ -212,10 +212,12 @@ private:
 
                 int test_y = -100;
                 cv::Point text_pos(center.x - 80, center.y + test_y);
-
+                tool_->drawOtherArmors(img, rvec, tvec);
+                //tool_->drawCarCenter(img, rvec, tvec);
+                std::cout<<"Yaw : "<<rvec.at<double>(0)<<" Pitch: "<<rvec.at<double>(1)<<std::endl;
                 cv::putText(img, "Yaw: " + std::to_string(yaw_target), text_pos,cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-                cv::putText(img, "Pitch: " + std::to_string(pitch_target), text_pos + cv::Point(0,50),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-                cv::putText(img, "Distance: " + std::to_string(distance), text_pos + cv::Point(0,75),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+                cv::putText(img, "Pitch: " + std::to_string(pitch_target), text_pos + cv::Point(0,75),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+                cv::putText(img, "Distance: " + std::to_string(distance), text_pos + cv::Point(0,90),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
             }
             else
             {
@@ -272,6 +274,8 @@ private:
             }
         }
 
+
+
         std::vector<TrackedTarget> curr_targets;
         for (size_t i = 0; i < detections.size(); ++i)
         {
@@ -294,31 +298,18 @@ private:
             armor_interfaces::msg::Armor armor_msg;
             armor_msg.id = assigned_ids[i];   // 关键：填入稳定 ID
 
-            // 填充角点
-            for (auto& pt : detections[i].corners)
-            {
-                geometry_msgs::msg::Point p;
-                p.x = pt.x; p.y = pt.y; p.z = 0.0;
-                armor_msg.corners.push_back(p);
-            }
-
             // 填充位姿信息
-            armor_msg.position.x = detections[i].x;
-            armor_msg.position.y = detections[i].y;
-            armor_msg.position.z = detections[i].z;
-            armor_msg.rotation.x = detections[i].rvec.at<double>(0);
-            armor_msg.rotation.y = detections[i].rvec.at<double>(1);
-            armor_msg.rotation.z = detections[i].rvec.at<double>(2);
             armor_msg.yaw = detections[i].yaw;
             armor_msg.pitch = detections[i].pitch;
             armor_msg.yaw_filtered = detections[i].yaw;   // 原始值，滤波节点会替换
+            armor_msg.pitch_filtered = detections[i].pitch;
 
             armor_array_msg.armors.push_back(armor_msg);
 
             if (!detections[i].corners.empty())
             {
                 cv::Point2f center = (detections[i].corners[0] + detections[i].corners[2]) / 2.0;
-                cv::putText(img, "ID: " + std::to_string(assigned_ids[i]), center, cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 0, 255), 2);
+                //cv::putText(img, "ID: " + std::to_string(assigned_ids[i]), center, cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0, 0, 255), 2);
             }
         }
         
