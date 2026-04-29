@@ -188,3 +188,17 @@ bool CameraWrapper::setExposure(float exposureMs) {
     }
     return false;
 }
+
+bool CameraWrapper::setGain(float gainDb) {
+    if (!isInitialized) return false;
+    // 关闭自动增益
+    GXSetEnumValueByString(hCamera, "GainAuto", "Off");
+    GX_STATUS status = GXSetFloatValue(hCamera, "Gain", gainDb);
+    if (status == GX_STATUS_SUCCESS) {
+        printf("[INFO] Gain set to %.2f dB\n", gainDb);
+        return true;
+    } else {
+        printf("[ERROR] Set Gain failed! status = %d\n", status);
+        return false;
+    }
+}

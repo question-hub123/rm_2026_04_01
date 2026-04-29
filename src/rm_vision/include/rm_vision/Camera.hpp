@@ -23,4 +23,5 @@ public:
     bool getFrame(cv::Mat& frame, int timeout = 1000);
     bool setExposure(float exposureMs);
     bool isOpen() const { return isInitialized; }
+    bool setGain(float gainDb);
 };

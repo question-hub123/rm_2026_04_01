@@ -30,13 +30,14 @@ public:
             rclcpp::shutdown();
             return;
         }
-        camera_->setExposure(50.0);
+        camera_->setExposure(25.0);
+        camera_->setGain(20.0);
 
         pub_ = this->create_publisher<armor_interfaces::msg::ArmorArray>("armor_msgs", 10);
         sub_ = this->create_subscription<armor_interfaces::msg::Serial>("serial_data",10, std::bind(&ArmorDetctor::sub_callback, this, std::placeholders::_1));
         timer_ = this->create_wall_timer(33ms, std::bind(&ArmorDetctor::timer_callback,this));
     
-        std::string model_path = "/home/aa/rm_ws/src/test_camera/src/Zenet-已训练好.onnx";
+        std::string model_path = "/home/aa/rm_ws/Zenet-已训练好.onnx";
         try 
         {
             net_ = cv::dnn::readNetFromONNX(model_path);
@@ -167,55 +168,53 @@ private:
         {
             if(corners.size() != 4) continue;
 
-            armor_interfaces::msg::Armor armor_msg;
-
-
             cv::Mat rvec, tvec;
-            double yaw, pitch, distance;
-            if (pnpsolver_->solveWithPose(corners, rvec, tvec, yaw, pitch, distance))
+            double yaw_rad, pitch_rad, distance;
+
+            // 1. 调用 PnP 解算，获取相对的弧度值
+            if (pnpsolver_->solveWithPose(corners, rvec, tvec, yaw_rad, pitch_rad, distance))
             {
                 DetectedArmor da;
                 da.corners = corners;
-                da.x = tvec.at<double>(0) * 1000.0;   // mm
+                da.x = tvec.at<double>(0) * 1000.0;   // 转为 mm
                 da.y = tvec.at<double>(1) * 1000.0;
                 da.z = tvec.at<double>(2) * 1000.0;
 
-                double yaw_target = std::atan2(tvec.at<double>(0),tvec.at<double>(2));
-                double pitch_target = std::atan2(tvec.at<double>(1),tvec.at<double>(2));
-
-                da.yaw = yaw_target;
-                da.pitch = pitch_target;
-                da.rvec = rvec;
-                da.tvec = tvec;
+                // =====================================
+                // 坐标系适配 (非常关键)：
+                // OpenCV相机系: X向右正，Y向下正
+                // RM云台系通常: Yaw向左正(逆时针)，Pitch向上正(抬头)
+                // 所以这里要加负号！
+                // =====================================
+                da.yaw   = -yaw_rad;    // 保存相对 Yaw (弧度)
+                da.pitch = -pitch_rad;  // 保存相对 Pitch (弧度)
+                da.rvec  = rvec;
+                da.tvec  = tvec;
                 da.valid = true;
                 detections.push_back(da);
 
-                cv::Point2f center = (corners[0] + corners[2]) / 2.0f;
+                // --- 屏幕显示：转换为度数，方便人类看 ---
+                double yaw_deg   = da.yaw   * 180.0 / M_PI;
+                double pitch_deg = da.pitch * 180.0 / M_PI;
 
+                cv::Point2f center = (corners[0] + corners[2]) / 2.0f;
                 int digit = recognizeDigit(img, corners);
-                if(digit != -1)
-                {
-                    cv::putText(img, "Type : " + std::to_string(digit), center + cv::Point2f(-150, -150) , cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
+                if(digit != -1) {
+                    cv::putText(img, "Type: " + std::to_string(digit), center + cv::Point2f(-150, -150) , cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
                 }
 
                 int test_y = -60;
                 cv::Point text_pos(center.x - 80, center.y + test_y);
+                tool_->drawOtherArmors(img, rvec, tvec);
 
-                cv::putText(img, "Yaw: " + std::to_string(yaw), text_pos,cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-                cv::putText(img, "Pitch: " + std::to_string(pitch), text_pos + cv::Point(0,25),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-                cv::putText(img, "Distance: " + std::to_string(distance), text_pos + cv::Point(0,50),cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
-            }
-            else
-            {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 1000, "PnP解算失败");
+                // 屏幕上打印度数！你会发现数值其实挺大的
+                char text_buf[64];
+                snprintf(text_buf, sizeof(text_buf), "Y:%.1f deg, P:%.1f deg", yaw_deg, pitch_deg);
+                cv::putText(img, text_buf, text_pos, cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
+                cv::putText(img, "Dist: " + std::to_string(distance), text_pos + cv::Point(0,30), cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 0), 2);
             }
         }
         
-
-        if (detections.empty())
-        {
-            RCLCPP_INFO(this->get_logger(),"NO TARGET");
-        }
 
         std::vector<int> assigned_ids(detections.size(), -1);
         std::vector<bool> used_prev(prev_targets_.size(), false);
@@ -282,18 +281,28 @@ private:
 
         for (size_t i = 0; i < detections.size(); ++i)
         {
+            // 这里全部是【弧度】相加，发给卡尔曼和电控的必须是弧度！
             double abs_yaw = cur_gimbal_yaw + detections[i].yaw;
             double abs_pitch = cur_gimbal_pitch + detections[i].pitch;
+            
+            // =====================================
+            // 终端打印：转换为度数给人类看
+            // =====================================
+            double print_yaw_deg = abs_yaw * 180.0 / M_PI;
+            double print_pitch_deg = abs_pitch * 180.0 / M_PI;
+            RCLCPP_INFO(this->get_logger(), "绝对瞄准角 -> Yaw: %.2f 度, Pitch: %.2f 度", print_yaw_deg, print_pitch_deg);
 
             armor_interfaces::msg::Armor armor_msg;
-            armor_msg.id = assigned_ids[i];   // 关键：填入稳定 ID
-            armor_msg.yaw = abs_yaw;
-            armor_msg.pitch = abs_pitch;
-            armor_msg.yaw_filtered = abs_yaw;  // 若未做滤波，先用原始值
+            armor_msg.id = assigned_ids[i];
+            armor_msg.x = detections[i].x / 1000.0; // 转为米
+            armor_msg.y = detections[i].y / 1000.0; // 转为米
+            armor_msg.z = detections[i].z / 1000.0; // 转为米 
+            armor_msg.yaw = abs_yaw;          // 必须存弧度
+            armor_msg.pitch = abs_pitch;      // 必须存弧度
+            armor_msg.yaw_filtered = abs_yaw;  
             armor_msg.pitch_filtered = abs_pitch;
             armor_msg.is_predict = false;
             
-
             armor_array_msg.armors.push_back(armor_msg);
 
             if (!detections[i].corners.empty())
@@ -306,7 +315,7 @@ private:
         prev_targets_ = curr_targets;
 
         cv::imshow("aa",img);
-        //cv::imshow("bb",mask2);
+        cv::imshow("bb",mask2);
         cv::waitKey(1);
         pub_->publish(armor_array_msg);
     }

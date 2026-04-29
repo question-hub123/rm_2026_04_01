@@ -6,13 +6,13 @@ PnpSolver::PnpSolver()
 {
     // 硬编码相机内参（根据你提供的参数）
     camera_matrix_ = (cv::Mat_<double>(3,3) <<
-        2374.54248, 0.0,        698.85288,
-        0.0,        2377.53648, 520.8649,
+        1296.16167, 0.0,        643.60901,
+        0.0,        1296.23028, 509.49319,
         0.0,        0.0,        1.0);
 
-    // 硬编码畸变系数
+    // 更新最新标定的畸变系数
     dist_coeffs_ = (cv::Mat_<double>(1,5) <<
-        -0.059743, 0.355479, -0.000625, 0.001595, 0.000000);
+        -0.069992, 0.120254, -0.001661, -0.000788, 0.000000);
 
     // 硬编码装甲板尺寸（米）
     double armor_width = 0.135;   // 135mm
@@ -37,7 +37,7 @@ bool PnpSolver::solve(const std::vector<cv::Point2f>& image_points,
     if (image_points.size() != 4) return false;
     return cv::solvePnP(object_points_, image_points,
                         camera_matrix_, dist_coeffs_,
-                        rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
+                        rvec, tvec, false, cv::SOLVEPNP_IPPE);
 }
 
 bool PnpSolver::solveWithPose(const std::vector<cv::Point2f>& image_points,
@@ -57,10 +57,8 @@ bool PnpSolver::solveWithPose(const std::vector<cv::Point2f>& image_points,
     // 计算欧拉角（度）
     cv::Mat rot_mat;
     cv::Rodrigues(rvec, rot_mat);
-    yaw   = std::atan2(rot_mat.at<double>(1,0), rot_mat.at<double>(0,0));
-    pitch = std::asin(-rot_mat.at<double>(2,0));
-    yaw   *= 180.0 / M_PI;
-    pitch *= 180.0 / M_PI;
+    yaw   = std::atan2(tvec.at<double>(0), tvec.at<double>(2));
+    pitch = std::atan2(tvec.at<double>(1), tvec.at<double>(2));
 
     return true;
 }

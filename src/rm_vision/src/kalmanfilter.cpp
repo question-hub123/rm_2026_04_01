@@ -1,6 +1,7 @@
 
 #include <Kalman.hpp>
 #include <cmath>
+#include <eigen3/Eigen/src/Core/Matrix.h>
 
 KF::KF(double dt)
     : initialized_(false)
@@ -14,18 +15,20 @@ KF::KF(double dt)
 
     // 过程噪声协方差 Q（需要根据实际情况调参）
     Q_ = Eigen::Matrix4d::Zero();
-    Q_(0, 0) = 0.01;   // yaw 过程噪声
-    Q_(1, 1) = 0.1;    // yaw_rate 过程噪声
-    Q_(2, 2) = 0.01;   // pitch 过程噪声
-    Q_(3, 3) = 0.1;    // pitch_rate 过程噪声
+    Q_(0, 0) = 0.08;   // yaw 过程噪声
+    Q_(1, 1) = 0.2;    // yaw_rate 过程噪声
+    Q_(2, 2) = 0.08;   // pitch 过程噪声
+    Q_(3, 3) = 0.2;    // pitch_rate 过程噪声
 
     // 测量噪声协方差 R（单位：弧度²，假设标准差约 0.03 rad ≈ 1.7°）
     R_ = Eigen::Matrix2d::Zero();
-    R_(0, 0) = 0.001;  // yaw 测量噪声方差
-    R_(1, 1) = 0.001;  // pitch 测量噪声方差
+    R_(0, 0) = 1.0;  // yaw 测量噪声方差
+    R_(1, 1) = 1.0;  // pitch 测量噪声方差
 
     // 初始协方差 P
     P_ = Eigen::Matrix4d::Identity() * 100.0;
+
+    X_ = Eigen::VectorXd(4);
 }
 
 void KF::init(double yaw, double pitch)

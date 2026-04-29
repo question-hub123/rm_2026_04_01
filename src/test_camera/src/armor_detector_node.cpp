@@ -49,7 +49,7 @@ public:
         timer_ = this->create_wall_timer(33ms, std::bind(&ArmorDetctor::timer_callback,this));
 
 
-        std::string model_path = "/home/aa/rm_ws/src/test_camera/src/Zenet-已训练好.onnx";
+        std::string model_path = "/home/aa/rm_ws/Zenet-已训练好.onnx";
         try 
         {
             net_ = cv::dnn::readNetFromONNX(model_path);
@@ -191,8 +191,8 @@ private:
                 da.y = tvec.at<double>(1) * 1000.0;
                 da.z = tvec.at<double>(2) * 1000.0;
 
-                double yaw_target = std::atan2(tvec.at<double>(0),tvec.at<double>(2));
-                double pitch_target = std::atan2(tvec.at<double>(1),tvec.at<double>(2));
+                double yaw_target = std::atan2(tvec.at<double>(0),tvec.at<double>(2)) * 180.0 / M_PI;
+                double pitch_target = std::atan2(tvec.at<double>(1),tvec.at<double>(2)) * 180.0 / M_PI;
 
                 da.yaw = yaw_target;
                 da.pitch = pitch_target;
@@ -212,7 +212,7 @@ private:
 
                 int test_y = -100;
                 cv::Point text_pos(center.x - 80, center.y + test_y);
-                tool_->drawOtherArmors(img, rvec, tvec);
+                tool_->drawOtherArmors_ori(img, rvec, tvec);
                 //tool_->drawCarCenter(img, rvec, tvec);
                 std::cout<<"Yaw : "<<rvec.at<double>(0)<<" Pitch: "<<rvec.at<double>(1)<<std::endl;
                 cv::putText(img, "Yaw: " + std::to_string(yaw_target), text_pos,cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);
@@ -316,7 +316,7 @@ private:
         prev_targets_ = curr_targets;
 
         cv::imshow("aa",img);
-        //cv::imshow("bb",mask2);
+        cv::imshow("bb",mask2);
         cv::waitKey(1);
         pub_->publish(armor_array_msg);
     }

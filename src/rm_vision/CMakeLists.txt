@@ -38,6 +38,7 @@ set(DAHENG_LIBS
 
 add_executable(armor_detector_node src/armor_detector_node.cpp src/Camera.cpp src/Pnp.cpp)
 add_executable(kalman_node src/kalman_node.cpp src/kalmanfilter.cpp)
+add_executable(EKFilter_node src/EKFilter_node.cpp src/EKF.cpp)
 add_executable(serial_node src/serial_node.cpp )
 
 target_include_directories(armor_detector_node PUBLIC
@@ -66,6 +67,13 @@ ament_target_dependencies(
   "serial_driver"
 )
 
+ament_target_dependencies(
+  EKFilter_node
+  "rclcpp"
+  "OpenCV"
+  "armor_interfaces"
+)
+
 # 【关键】直接链接绝对路径的库文件
 target_link_libraries(armor_detector_node
   ${DAHENG_LIBS}
@@ -73,7 +81,8 @@ target_link_libraries(armor_detector_node
   ${OpenCV_LIBS}
 )
 
-install(TARGETS armor_detector_node kalman_node serial_node
+
+install(TARGETS armor_detector_node kalman_node serial_node EKFilter_node
   DESTINATION lib/${PROJECT_NAME})
 
 install(
