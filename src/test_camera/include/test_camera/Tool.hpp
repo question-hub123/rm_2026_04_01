@@ -1,26 +1,24 @@
 #pragma once
-
 #include <cstddef>
 #include <cstdlib>
-#include <opencv2/calib3d.hpp>
 #include <opencv2/core.hpp>
 #include <opencv2/core/mat.hpp>
 #include <opencv2/core/types.hpp>
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp>
 #include <rclcpp/logging.hpp>
+#include <eigen3/Eigen/Dense>
 #include <vector>
-#include <Eigen/Dense>
 
 class Tool
 {
 public:
-    std::vector<std::vector<cv::Point>> findContours2_blue(cv::Mat& img, cv::Mat& mask2)//找轮廓
+    std::vector<std::vector<cv::Point>> findContours_blue(cv::Mat& img, cv::Mat& mask2)//找轮廓
 	{
         cv::Mat hsv;
         cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
         cv::Mat blue_mask;
-        cv::inRange(hsv, cv::Scalar(80, 50, 50), cv::Scalar(100, 255, 255), blue_mask);
+        cv::inRange(hsv, cv::Scalar(80, 0, 60), cv::Scalar(100, 255, 255), blue_mask);
 
         /*cv::Mat white_mask;
         cv::inRange(hsv, cv::Scalar(0, 0, 200), cv::Scalar(180, 30, 255), white_mask);
@@ -42,7 +40,7 @@ public:
 		for (size_t i = 0; i < contours.size(); ++i)
 		{
 			double area = cv::contourArea(contours[i]);
-			if (area < 100) continue;
+			if (area < 10) continue;
 			cv::Rect rect = cv::boundingRect(contours[i]);
 			cv::Point2f rect_center(rect.x + rect.width / 2, rect.y + rect.height / 2);
 			cv::drawContours(img, contours, i, cv::Scalar(0, 255, 0), 2);
@@ -51,7 +49,7 @@ public:
 		return final_contours;
 	}
 
-    std::vector<std::vector<cv::Point>> findContours2_red(cv::Mat& img, cv::Mat& mask2)//找轮廓
+    std::vector<std::vector<cv::Point>> findContours_red(cv::Mat& img, cv::Mat& mask2)//找轮廓
 	{
         cv::Mat hsv;
         cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
@@ -66,7 +64,7 @@ public:
         cv::bitwise_or(mask_low, mask_high, red_mask);
 
         cv::Mat white_mask;
-        cv::inRange(hsv, cv::Scalar(0, 0, 150), cv::Scalar(180, 30, 255), white_mask);
+        cv::inRange(hsv, cv::Scalar(0, 0, 200), cv::Scalar(180, 30, 255), white_mask);
         cv::bitwise_and(red_mask, ~white_mask, red_mask);
 
 		cv::Mat gray, mask;
@@ -88,7 +86,7 @@ public:
 		for (size_t i = 0; i < contours.size(); ++i)
 		{
 			double area = cv::contourArea(contours[i]);
-			if (area < 120) continue;
+			if (area < 35) continue;
 			cv::Rect rect = cv::boundingRect(contours[i]);
 			cv::Point2f rect_center(rect.x + rect.width / 2, rect.y + rect.height / 2);
 			cv::drawContours(img, contours, i, cv::Scalar(0, 255, 0), 2);
@@ -97,7 +95,7 @@ public:
 		return final_contours;
 	}
 
-    std::vector<std::vector<cv::Point2f>> drawRect3(std::vector<std::vector<cv::Point>> contours, cv::Mat& img)
+    std::vector<std::vector<cv::Point2f>> drawRect(std::vector<std::vector<cv::Point>> contours, cv::Mat& img)
     {
         std::vector<bool> used(contours.size(), false);
         std::vector<std::pair<int, int>> armorGroups;
@@ -119,7 +117,7 @@ public:
             float ratio1 = h1 / w1;
             // 长宽比过滤，排除明显不是灯条的轮廓
             //if (ratio1 < 0.5 || ratio1 > 25.0) continue;
-            if(ratio1 < 1.0 || ratio1 > 25.0) continue;
+            //if(ratio1 < 0.5 || ratio1 > 25.0) continue;
 
             for (size_t j = i + 1; j < contours.size(); ++j) {
                 if (used[j]) continue;
@@ -128,12 +126,12 @@ public:
                 float h2 = std::max(r2.size.width, r2.size.height);
                 float w2 = std::min(r2.size.width, r2.size.height);
                 float ratio2 = h2 / w2;
-                if (ratio2 < 1.0 || ratio2 > 25.0) continue;
+                //if (ratio2 < 3.4 || ratio2 > 25.0) continue;
 
                 float avg_h = (h1 + h2) / 2.0f;
 
                 // 高度差不能太大（通常不超过平均高度的1/4）
-                if (std::abs(h1 - h2) > avg_h * 1.75f) continue;
+                //if (std::abs(h1 - h2) > avg_h * 1.75f) continue;
 
                 // Y方向中心点偏差不能太大
                 if (std::abs(r1.center.y - r2.center.y) > avg_h * 0.75f) continue;
@@ -204,113 +202,17 @@ public:
         return armorCorners;
     }
 
-
-
     void drawOtherArmors(cv::Mat& img, const cv::Mat& rvec, const cv::Mat& tvec)
-    {
-        // ==================== 1. 参数配置 ====================
-        const double ARMOR_W = 0.135; 
-        const double ARMOR_H = 0.125; 
-        const double CAR_RADIUS = 0.20; 
-        const cv::Mat K = (cv::Mat_<double>(3,3) << 2374.54248, 0.0, 698.85288, 0.0, 2377.53648, 520.8649, 0.0, 0.0, 1.0);
-
-        // ==================== 2. 提取状态并平滑 Pitch ====================
-        cv::Mat R_cur;
-        cv::Rodrigues(rvec, R_cur);
-        
-        // 获取 Yaw
-        cv::Mat normal = R_cur * (cv::Mat_<double>(3,1) << 0, 0, 1);
-        double yaw = std::atan2(normal.at<double>(0), normal.at<double>(2));
-
-        // 获取原始的向上向量（包含 Pitch 和 Roll）
-        cv::Mat armor_up_vec = R_cur * (cv::Mat_<double>(3,1) << 0, 1, 0); 
-        double hx = armor_up_vec.at<double>(0);
-        double hy = armor_up_vec.at<double>(1);
-        double hz = armor_up_vec.at<double>(2);
-
-        // --- 【新增：消除 0 Pitch 抖动逻辑】 ---
-        double cos_y = std::cos(yaw);
-        double sin_y = std::sin(yaw);
-
-        // 步骤 A: 将向量反向旋转抵消 Yaw，转入“车体局部坐标系”
-        // 在这个坐标系下，hz_local 纯粹代表前后俯仰，hx_local 纯粹代表左右侧倾
-        double hx_local = cos_y * hx - sin_y * hz;
-        double hz_local = sin_y * hx + cos_y * hz;
-        double hy_local = hy;
-
-        // 步骤 B: 钳制 Pitch（hz_local < 0 代表装甲板顶部远离相机，即上翻）
-        // 设定 0.05 的阈值（大约 3 度），如果在这个范围内抖动，强制锁定为上翻
-        const double PITCH_THRESH = -0.20; 
-        if (std::abs(hz_local) < 2.0) {
-            hz_local = PITCH_THRESH; 
-        }
-
-        // （可选隐藏福利）: 如果你发现重投影有左右倾斜抖动，可以解除下面这行的注释，强制消除侧倾
-        hx_local = 0.0; 
-
-        // 步骤 C: 重新归一化（防止强制修改后向量长度变化导致框变大/变小）
-        double len = std::sqrt(hx_local*hx_local + hy_local*hy_local + hz_local*hz_local);
-        hx_local /= len; 
-        hy_local /= len; 
-        hz_local /= len;
-
-        // 步骤 D: 带着干净的 Pitch 重新旋转回相机坐标系，作为全局高度向量
-        cv::Point3d global_h_dir(
-            cos_y * hx_local + sin_y * hz_local,
-            hy_local,
-            -sin_y * hx_local + cos_y * hz_local
-        );
-        // ------------------------------------
-
-        // ==================== 3. 计算车体中心 ====================
-        double car_center_cam_x = tvec.at<double>(0) - CAR_RADIUS * std::sin(yaw);
-        double car_center_cam_y = tvec.at<double>(1); 
-        double car_center_cam_z = tvec.at<double>(2) - CAR_RADIUS * std::cos(yaw);
-
-        // ==================== 4. 绘制剩下三块板 ====================
-        for (int i = 1; i <= 3; ++i) { 
-            double current_yaw = yaw + i * (CV_PI / 2.0);
-
-            double cx = car_center_cam_x + CAR_RADIUS * std::sin(current_yaw);
-            double cy = car_center_cam_y;
-            double cz = car_center_cam_z + CAR_RADIUS * std::cos(current_yaw);
-
-            double cur_cos_y = std::cos(current_yaw);
-            double cur_sin_y = std::sin(current_yaw);
-            cv::Point3d w_dir(cur_cos_y, 0, -cur_sin_y); 
-
-            // 使用过滤后的 global_h_dir 代替原来的 h_dir
-            std::vector<cv::Point3d> corners_cam;
-            corners_cam.push_back(cv::Point3d(cx, cy, cz) - w_dir*(ARMOR_W/2.0) - global_h_dir*(ARMOR_H/2.0));
-            corners_cam.push_back(cv::Point3d(cx, cy, cz) + w_dir*(ARMOR_W/2.0) - global_h_dir*(ARMOR_H/2.0));
-            corners_cam.push_back(cv::Point3d(cx, cy, cz) + w_dir*(ARMOR_W/2.0) + global_h_dir*(ARMOR_H/2.0));
-            corners_cam.push_back(cv::Point3d(cx, cy, cz) - w_dir*(ARMOR_W/2.0) + global_h_dir*(ARMOR_H/2.0));
-
-            std::vector<cv::Point2f> img_pts;
-            for (const auto& p : corners_cam) {
-                if (p.z <= 0) continue;
-                float u = K.at<double>(0,0) * p.x / p.z + K.at<double>(0,2);
-                float v = K.at<double>(1,1) * p.y / p.z + K.at<double>(1,2);
-                img_pts.push_back(cv::Point2f(u, v));
-            }
-
-            if (img_pts.size() == 4) {
-                for (int j = 0; j < 4; ++j)
-                    cv::line(img, img_pts[j], img_pts[(j+1)%4], cv::Scalar(255, 100, 0), 2);
-            }
-        }
-    }
-
-        void drawOtherArmors_ori(cv::Mat& img, const cv::Mat& rvec, const cv::Mat& tvec)
     {
         // ==================== 参数配置 ====================
         const double ARMOR_W = 0.135;   // 真实装甲板宽 135mm
-        const double ARMOR_H = 0.085;   // 真实装甲板高 125mm
+        const double ARMOR_H = 0.055;   // 真实装甲板高 125mm
         const double CAR_RADIUS = 0.20; // 车辆半径 200mm
 
-        const cv::Mat K = (cv::Mat_<double>(3,3) << 1330.54525, 0.0, 642.60771,
-                0.0,        1329.21216, 492.68961,
-                0.0,        0.0,        1.0);;
+        const cv::Mat K = (cv::Mat_<double>(3,3) <<
+        1296.16167, 0.0,        643.60901,
+        0.0,        1296.23028, 509.49319,
+        0.0,        0.0,        1.0);
 
         // 1. 提取原始 Yaw
         cv::Mat R_cur;
@@ -385,6 +287,150 @@ public:
             }
         }
     }
-    
-    
+
+    void initAnglePlot(size_t max_history = 200,
+                       cv::Vec2f yaw_range = cv::Vec2f(-30.f, 30.f),
+                       cv::Vec2f pitch_range = cv::Vec2f(-10.f, 10.f))
+    {
+        max_history_ = max_history;
+        yaw_range_ = yaw_range;
+        pitch_range_ = pitch_range;
+        plot_yaw_   = cv::Mat::zeros(480, 640, CV_8UC3);
+        plot_pitch_ = cv::Mat::zeros(480, 640, CV_8UC3);
+    }
+
+    /**
+     * @brief 每帧更新并显示曲线（在主循环中调用，注意不要与其它 imshow/waitKey 冲突）
+     * @param raw_yaw        原始绝对 yaw（度）
+     * @param filtered_yaw   卡尔曼滤波后的 yaw（度）
+     * @param raw_pitch      原始绝对 pitch（度）
+     * @param filtered_pitch 卡尔曼滤波后的 pitch（度）
+     */
+    void updateAndPlotAngles(double raw_yaw, double filtered_yaw,
+                             double raw_pitch, double filtered_pitch)
+    {
+        // 更新缓冲区（保持最大长度）
+        raw_yaw_history_.push_back(raw_yaw);
+        filtered_yaw_history_.push_back(filtered_yaw);
+        raw_pitch_history_.push_back(raw_pitch);
+        filtered_pitch_history_.push_back(filtered_pitch);
+
+        if (raw_yaw_history_.size() > max_history_)       raw_yaw_history_.pop_front();
+        if (filtered_yaw_history_.size() > max_history_) filtered_yaw_history_.pop_front();
+        if (raw_pitch_history_.size() > max_history_)     raw_pitch_history_.pop_front();
+        if (filtered_pitch_history_.size() > max_history_) filtered_pitch_history_.pop_front();
+
+        // 绘制 yaw 曲线
+        drawSingleCurve(plot_yaw_, raw_yaw_history_, filtered_yaw_history_,
+                        "Yaw (deg)", yaw_range_);
+        // 绘制 pitch 曲线
+        drawSingleCurve(plot_pitch_, raw_pitch_history_, filtered_pitch_history_,
+                        "Pitch (deg)", pitch_range_);
+
+        cv::imshow("Yaw Curve", plot_yaw_);
+        cv::imshow("Pitch Curve", plot_pitch_);
+    }
+
+    Eigen::Vector3d cameraToWorld(const Eigen::Vector3d& pos_cam, double curr_yaw, double curr_pitch) 
+    {
+        // 1. 将 OpenCV 相机坐标系 (x-右, y-下, z-前) 
+        //    映射到云台初始坐标系 (x-前, y-左, z-上)
+        //    映射关系：x_w = z_c, y_w = -x_c, z_w = -y_c
+        Eigen::Vector3d p_gimbal_initial;
+        p_gimbal_initial << pos_cam.z(), -pos_cam.x(), -pos_cam.y();
+
+        // 2. 构建旋转矩阵
+        // 注意：RoboMaster 的 Pitch 通常向上为正/负需根据你电控协议确定
+        // 这里假设：Pitch 向上抬头为正，Yaw 向左转为正
+        
+        // 绕 Y 轴旋转 (Pitch)
+        Eigen::AngleAxisd pitch_rot(curr_pitch, Eigen::Vector3d::UnitY());
+        // 绕 Z 轴旋转 (Yaw)
+        Eigen::AngleAxisd yaw_rot(curr_yaw, Eigen::Vector3d::UnitZ());
+
+        // 组合旋转矩阵 (先绕 Pitch 旋，再绕 Yaw 旋)
+        Eigen::Matrix3d rotation_matrix = yaw_rot.toRotationMatrix() * pitch_rot.toRotationMatrix();
+
+        // 3. 执行旋转变换
+        Eigen::Vector3d p_world = rotation_matrix * p_gimbal_initial;
+
+        // 4. (可选) 补偿相机相对于云台中心的偏移量 (Offset)
+        // 如果你的相机安装在云台轴心上方 5cm，前方 10cm：
+        // Eigen::Vector3d offset(0.10, 0.0, 0.05);
+        // p_world += offset;
+
+        return p_world;
+    }
+
+private:
+    // 绘制一张曲线图（内部辅助）
+    void drawSingleCurve(cv::Mat& canvas,
+                         const std::deque<double>& raw_hist,
+                         const std::deque<double>& filt_hist,
+                         const std::string& title,
+                         cv::Vec2f range)
+    {
+        canvas.setTo(cv::Scalar(0, 0, 0));   // 黑色背景
+
+        int w = canvas.cols;
+        int h = canvas.rows;
+        float min_val = range[0];
+        float max_val = range[1];
+        float scale_x = static_cast<float>(w) / (max_history_ > 1 ? max_history_ : 1);
+        float scale_y = static_cast<float>(h) / (max_val - min_val);
+
+        // 中线
+        cv::line(canvas, cv::Point(0, h/2), cv::Point(w, h/2), cv::Scalar(50,50,50), 1);
+        // 标题
+        cv::putText(canvas, title, cv::Point(10, 30),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,255,255), 2);
+
+        // 画原始角度曲线（蓝色）
+        drawLineSeries(canvas, raw_hist, scale_x, scale_y, h, min_val, cv::Scalar(255,0,0));
+        // 画滤波角度曲线（绿色）
+        drawLineSeries(canvas, filt_hist, scale_x, scale_y, h, min_val, cv::Scalar(0,255,0));
+
+        // 图例
+        cv::putText(canvas, "Raw", cv::Point(w-120,30),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,0,0), 2);
+        cv::putText(canvas, "Filtered", cv::Point(w-120,60),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2);
+    }
+
+    void drawLineSeries(cv::Mat& img, const std::deque<double>& data,
+                        float scale_x, float scale_y, int img_h, float min_val,
+                        cv::Scalar color)
+    {
+        if (data.size() < 2) return;
+        for (size_t i = 1; i < data.size(); ++i)
+        {
+            int x1 = static_cast<int>((i-1) * scale_x);
+            int y1 = static_cast<int>(img_h - (data[i-1] - min_val) * scale_y);
+            int x2 = static_cast<int>(i * scale_x);
+            int y2 = static_cast<int>(img_h - (data[i] - min_val) * scale_y);
+
+            // 边界裁剪
+            x1 = std::max(0, std::min(x1, img.cols-1));
+            y1 = std::max(0, std::min(y1, img.rows-1));
+            x2 = std::max(0, std::min(x2, img.cols-1));
+            y2 = std::max(0, std::min(y2, img.rows-1));
+
+            cv::line(img, cv::Point(x1, y1), cv::Point(x2, y2), color, 2);
+        }
+    }
+
+    // 历史数据队列（环形）
+    std::deque<double> raw_yaw_history_;
+    std::deque<double> filtered_yaw_history_;
+    std::deque<double> raw_pitch_history_;
+    std::deque<double> filtered_pitch_history_;
+
+    // 绘图参数
+    size_t max_history_ = 200;                     // 曲线最多显示点数
+    cv::Vec2f yaw_range_   = cv::Vec2f(-30.f, 30.f);   // yaw 显示范围（度）
+    cv::Vec2f pitch_range_ = cv::Vec2f(-10.f, 10.f);   // pitch 显示范围（度）
+
+    // 绘图画布
+    cv::Mat plot_yaw_;
+    cv::Mat plot_pitch_;
 };

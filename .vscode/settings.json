@@ -1,4 +1,3 @@
 {
-    "python-envs.defaultEnvManager": "ms-python.python:system",
-    "cmake.sourceDirectory": "/home/aa/rm_ws/src/rm_vision"
+    "cmake.ignoreCMakeListsMissing": true
 }

@@ -30,7 +30,7 @@ public:
             rclcpp::shutdown();
             return;
         }
-        camera_->setExposure(25.0);
+        camera_->setExposure(35.0);
         camera_->setGain(20.0);
 
         pub_ = this->create_publisher<armor_interfaces::msg::ArmorArray>("armor_msgs", 10);

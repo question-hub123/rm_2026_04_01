@@ -18,7 +18,7 @@ public:
         cv::Mat hsv;
         cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
         cv::Mat blue_mask;
-        cv::inRange(hsv, cv::Scalar(80, 0, 60), cv::Scalar(100, 255, 255), blue_mask);
+        cv::inRange(hsv, cv::Scalar(80, 50, 60), cv::Scalar(100, 255, 255), blue_mask);
 
         /*cv::Mat white_mask;
         cv::inRange(hsv, cv::Scalar(0, 0, 200), cv::Scalar(180, 30, 255), white_mask);
@@ -86,7 +86,7 @@ public:
 		for (size_t i = 0; i < contours.size(); ++i)
 		{
 			double area = cv::contourArea(contours[i]);
-			if (area < 35) continue;
+			if (area < 100) continue;
 			cv::Rect rect = cv::boundingRect(contours[i]);
 			cv::Point2f rect_center(rect.x + rect.width / 2, rect.y + rect.height / 2);
 			cv::drawContours(img, contours, i, cv::Scalar(0, 255, 0), 2);

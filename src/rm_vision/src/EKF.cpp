@@ -1,110 +1,157 @@
 #include "EKF.hpp"
 
-EKF::EKF() : initialized_(false) {
-    X_ = Eigen::VectorXd::Zero(10);
-    P_ = Eigen::MatrixXd::Identity(10, 10) * 1.0;
-    
-    Q_ = Eigen::MatrixXd::Identity(10, 10);
-    Q_.block<3,3>(0,0) *= 0.01; // XYZ位置噪声
-    Q_.block<3,3>(3,3) *= 0.1;  // XYZ速度噪声
-    Q_(6,6) = 0.05; Q_(7,7) = 0.5; // Yaw及角速度噪声
-    Q_(8,8) = 0.05; Q_(9,9) = 0.5; // Pitch及角速度噪声
+EKF::EKF() : initialized_(false)
+{
+    X_ = Eigen::VectorXd::Zero(13);
+    P_ = Eigen::MatrixXd::Identity(13, 13) * 100.0;
 
-    R_ = Eigen::MatrixXd::Identity(5, 5);
-    R_.block<3,3>(0,0) *= 0.05; // XYZ测量噪声
-    R_(3,3) = 0.1;             // Yaw测量噪声
-    R_(4,4) = 0.1;             // Pitch测量噪声
+    // 过程噪声 Q (13x13)
+    Q_ = Eigen::MatrixXd::Zero(13, 13);
+    Q_(IDX_X, IDX_X) = 0.001; Q_(IDX_Y, IDX_Y) = 0.001; Q_(IDX_Z, IDX_Z) = 0.001;
+    Q_(IDX_VX, IDX_VX) = 0.01; Q_(IDX_VY, IDX_VY) = 0.01; Q_(IDX_VZ, IDX_VZ) = 0.01;
+    Q_(IDX_AX, IDX_AX) = 0.5;  Q_(IDX_AY, IDX_AY) = 0.5;  Q_(IDX_AZ, IDX_AZ) = 0.5;
+    Q_(IDX_YAW,   IDX_YAW)   = 0.01;
+    Q_(IDX_VYAW,  IDX_VYAW)  = 0.1;
+    Q_(IDX_AYAW,  IDX_AYAW)  = 1.0;
+    Q_(IDX_R, IDX_R) = 1e-6;   // 半径近乎常数
+
+    // 测量噪声 R (4x4)
+    R_ = Eigen::MatrixXd::Zero(4, 4);
+    R_(0,0) = 0.05;   // x (m²)
+    R_(1,1) = 0.05;   // y
+    R_(2,2) = 0.10;   // z
+    R_(3,3) = 0.02;   // yaw (rad²)
 }
 
-void EKF::init(const Eigen::Vector3d& p_armor, double yaw_abs, double pitch_abs) {
-    // 根据 3D 球面模型，从装甲板位置反推中心位置
-    double xc = p_armor.x() - r_ * cos(yaw_abs) * cos(pitch_abs);
-    double yc = p_armor.y() - r_ * sin(yaw_abs) * cos(pitch_abs);
-    double zc = p_armor.z() - r_ * sin(pitch_abs);
-    
-    X_ << xc, yc, zc, 0, 0, 0, yaw_abs, 0, pitch_abs, 0;
+void EKF::init(const Eigen::Vector3d& p_armor, double yaw_abs)
+{
+    double r0 = 0.25;   // 初始猜测半径
+
+    // 反推车体中心 (世界系)
+    double xc = p_armor.x() - r0 * std::sin(yaw_abs);
+    double yc = p_armor.y();                         // 假设 y 无横向偏移
+    double zc = p_armor.z() - r0 * std::cos(yaw_abs);
+
+    X_.setZero();
+    X_(IDX_X)   = xc;
+    X_(IDX_Y)   = yc;
+    X_(IDX_Z)   = zc;
+    X_(IDX_VX)  = 0.0;
+    X_(IDX_VY)  = 0.0;
+    X_(IDX_VZ)  = 0.0;
+    X_(IDX_AX)  = 0.0;
+    X_(IDX_AY)  = 0.0;
+    X_(IDX_AZ)  = 0.0;
+    X_(IDX_YAW)  = yaw_abs;
+    X_(IDX_VYAW) = 0.0;
+    X_(IDX_AYAW) = 0.0;
+    X_(IDX_R)    = r0;
+
+    P_ = Eigen::MatrixXd::Identity(13, 13) * 100.0;
     initialized_ = true;
 }
 
-void EKF::predict(double dt) {
-    if (!initialized_) return;
-    
-    // 状态转移 f(X)
-    X_(0) += X_(3) * dt; X_(1) += X_(4) * dt; X_(2) += X_(5) * dt;
-    X_(6) += X_(7) * dt; X_(6) = normalizeAngle(X_(6));
-    X_(8) += X_(9) * dt; X_(8) = normalizeAngle(X_(8));
+void EKF::predict(double dt)
+{
+    if (!initialized_ || dt <= 0.0) return;
 
-    // 雅可比 F
-    Eigen::MatrixXd F = Eigen::MatrixXd::Identity(10, 10);
-    F(0, 3) = F(1, 4) = F(2, 5) = F(6, 7) = F(8, 9) = dt;
-    
+    // 匀加速状态预测
+    X_(IDX_X) += X_(IDX_VX) * dt + 0.5 * X_(IDX_AX) * dt * dt;
+    X_(IDX_Y) += X_(IDX_VY) * dt + 0.5 * X_(IDX_AY) * dt * dt;
+    X_(IDX_Z) += X_(IDX_VZ) * dt + 0.5 * X_(IDX_AZ) * dt * dt;
+    X_(IDX_VX) += X_(IDX_AX) * dt;
+    X_(IDX_VY) += X_(IDX_AY) * dt;
+    X_(IDX_VZ) += X_(IDX_AZ) * dt;
+    X_(IDX_YAW)  += X_(IDX_VYAW) * dt + 0.5 * X_(IDX_AYAW) * dt * dt;
+    X_(IDX_VYAW) += X_(IDX_AYAW) * dt;
+    X_(IDX_YAW) = normalizeAngle(X_(IDX_YAW));
+    // 半径保持不变
+
+    // 状态转移雅可比 F (13x13)
+    Eigen::MatrixXd F = Eigen::MatrixXd::Identity(13, 13);
+    F(IDX_X,   IDX_VX) = dt;   F(IDX_X,   IDX_AX) = 0.5 * dt * dt;
+    F(IDX_Y,   IDX_VY) = dt;   F(IDX_Y,   IDX_AY) = 0.5 * dt * dt;
+    F(IDX_Z,   IDX_VZ) = dt;   F(IDX_Z,   IDX_AZ) = 0.5 * dt * dt;
+    F(IDX_VX,  IDX_AX) = dt;
+    F(IDX_VY,  IDX_AY) = dt;
+    F(IDX_VZ,  IDX_AZ) = dt;
+    F(IDX_YAW, IDX_VYAW) = dt; F(IDX_YAW, IDX_AYAW) = 0.5 * dt * dt;
+    F(IDX_VYAW,IDX_AYAW) = dt;
+
     P_ = F * P_ * F.transpose() + Q_;
 }
 
-void EKF::update(const Eigen::Vector3d& p_armor, double yaw_abs, double pitch_abs) {
-    // 1. 寻找 4 块板中最匹配的那块 (基于 Yaw)
-    double min_diff = 1e9; int best_i = 0;
-    for (int i = 0; i < 4; i++) {
-        double t_yaw = X_(6) + i * M_PI / 2.0;
-        double diff = std::abs(normalizeAngle(yaw_abs - t_yaw));
-        if (diff < min_diff) { min_diff = diff; best_i = i; }
+double EKF::normalizeAngle(double angle) const
+{
+    double a = std::fmod(angle, 2.0 * M_PI);
+    if (a > M_PI)        a -= 2.0 * M_PI;
+    else if (a < -M_PI)  a += 2.0 * M_PI;
+    return a;
+}
+
+void EKF::update(const Eigen::Vector3d& p_armor, double yaw_abs)
+{
+    if (!initialized_) return;
+
+    // 数据关联：选择最匹配的装甲板面
+    double yaw_est = X_(IDX_YAW);
+    double min_diff = 1e9;
+    int best_idx = 0;
+    for (int i = 0; i < 4; ++i) {
+        double target_yaw = yaw_est + i * (M_PI / 2.0);
+        double diff = std::abs(normalizeAngle(yaw_abs - target_yaw));
+        if (diff < min_diff) {
+            min_diff = diff;
+            best_idx = i;
+        }
     }
-    double matched_yaw = X_(6) + best_i * M_PI / 2.0;
-    double matched_pitch = X_(8); // Pitch 不做四面体匹配
+    double matched_yaw = yaw_est + best_idx * (M_PI / 2.0);
 
-    // 2. 预测观测 h(X) (3D球面模型：X-Y 为水平面，Z 为高度)
-    Eigen::VectorXd z_pred(5);
-    z_pred << X_(0) + r_ * cos(matched_yaw) * cos(matched_pitch),
-              X_(1) + r_ * sin(matched_yaw) * cos(matched_pitch),
-              X_(2) + r_ * sin(matched_pitch),
-              matched_yaw,
-              matched_pitch;
+    double r_est = X_(IDX_R);
 
-    // 3. 计算雅可比 H (5x10)
-    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(5, 10);
-    H(0, 0) = 1.0; 
-    H(0, 6) = -r_ * sin(matched_yaw) * cos(matched_pitch);
-    H(0, 8) = -r_ * cos(matched_yaw) * sin(matched_pitch);
-    
-    H(1, 1) = 1.0;
-    H(1, 6) =  r_ * cos(matched_yaw) * cos(matched_pitch);
-    H(1, 8) = -r_ * sin(matched_yaw) * sin(matched_pitch);
-    
-    H(2, 2) = 1.0; 
-    H(2, 8) =  r_ * cos(matched_pitch);
-    
-    H(3, 6) = 1.0;
-    H(4, 8) = 1.0;
+    // 预测观测 h(X)
+    Eigen::VectorXd z_pred(4);
+    z_pred(0) = X_(IDX_X) + r_est * std::sin(matched_yaw);
+    z_pred(1) = X_(IDX_Y);   // y 无偏移
+    z_pred(2) = X_(IDX_Z) + r_est * std::cos(matched_yaw);
+    z_pred(3) = normalizeAngle(matched_yaw);
 
-    // 4. 更新
-    Eigen::VectorXd z_meas(5);
-    z_meas << p_armor.x(), p_armor.y(), p_armor.z(), yaw_abs, pitch_abs;
-    
-    Eigen::VectorXd y = z_meas - z_pred;
-    y(3) = normalizeAngle(y(3));
-    y(4) = normalizeAngle(y(4));
+    // 观测雅可比 H (4x13)
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(4, 13);
+    H(0, IDX_X)   = 1.0;
+    H(0, IDX_YAW) =  r_est * std::cos(matched_yaw);
+    H(0, IDX_R)   = std::sin(matched_yaw);
 
+    H(1, IDX_Y)   = 1.0;
+
+    H(2, IDX_Z)   = 1.0;
+    H(2, IDX_YAW) = -r_est * std::sin(matched_yaw);
+    H(2, IDX_R)   = std::cos(matched_yaw);
+
+    H(3, IDX_YAW) = 1.0;
+
+    // 测量向量
+    Eigen::VectorXd z_meas(4);
+    z_meas << p_armor.x(), p_armor.y(), p_armor.z(), yaw_abs;
+
+    // 新息
+    Eigen::VectorXd y_res = z_meas - z_pred;
+    y_res(3) = normalizeAngle(y_res(3));
+
+    // 卡尔曼更新
     Eigen::MatrixXd S = H * P_ * H.transpose() + R_;
     Eigen::MatrixXd K = P_ * H.transpose() * S.inverse();
-    
-    X_ = X_ + K * y;
-    X_(6) = normalizeAngle(X_(6));
-    X_(8) = normalizeAngle(X_(8));
-    
-    P_ = (Eigen::MatrixXd::Identity(10, 10) - K * H) * P_;
+    X_ = X_ + K * y_res;
+    P_ = (Eigen::MatrixXd::Identity(13, 13) - K * H) * P_;
+
+    X_(IDX_YAW) = normalizeAngle(X_(IDX_YAW));
+    if (X_(IDX_R) < 0.05) X_(IDX_R) = 0.05;   // 半径物理下限
 }
 
-double EKF::normalizeAngle(double angle) {
-    static const double PI2 = 2.0 * M_PI;
-    angle = fmod(angle + M_PI, PI2);
-    if (angle < 0) angle += PI2;
-    return angle - M_PI;
-}
-
-void EKF::getState(Eigen::Vector3d& pos_c, double& yaw, double& v_yaw, double& pitch, double& v_pitch) const {
-    pos_c = X_.head<3>(); 
-    yaw = X_(6); 
-    v_yaw = X_(7);
-    pitch = X_(8);
-    v_pitch = X_(9);
+void EKF::getState(Eigen::Vector3d& pos_c, double& yaw, double& v_yaw, double& r) const
+{
+    pos_c = X_.segment<3>(IDX_X);
+    yaw   = X_(IDX_YAW);
+    v_yaw = X_(IDX_VYAW);
+    r     = X_(IDX_R);
 }

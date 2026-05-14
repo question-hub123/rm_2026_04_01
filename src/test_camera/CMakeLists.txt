@@ -128,10 +128,23 @@ target_link_libraries(armor_detector_node Eigen3::Eigen)
 target_link_libraries(kalman_node Eigen3::Eigen)
 target_link_libraries(armor_detector_node ${OpenCV_LIBRARIES})
 
+# 原有 ONNX Runtime 链接 (通过 link_directories)
 target_link_libraries(yolo_armor_detect
   ${OpenCV_LIBS}
   onnxruntime   # ★ 只写库名，CMake 会自动去 link_directories 里找
 )
+
+# ===== 新增：强制找到 onnxruntime 库并显式链接 =====
+find_library(ONNXRUNTIME_LIB onnxruntime
+             PATHS ${ONNXRUNTIME_LIB_DIR}
+             NO_DEFAULT_PATH
+             REQUIRED)
+message(STATUS "ONNX Runtime library: ${ONNXRUNTIME_LIB}")
+# 显式链接找到的库 (避免 link_directories 失效)
+target_link_libraries(yolo_armor_detect ${ONNXRUNTIME_LIB})
+# 可能需要的系统依赖 (与现有链接不冲突)
+target_link_libraries(yolo_armor_detect pthread dl)
+# ===== 新增结束 =====
 
 install(TARGETS image_publisher visualizer_node armor_detector_node kalman_node serial_node yolo_armor_detect
   DESTINATION lib/${PROJECT_NAME})

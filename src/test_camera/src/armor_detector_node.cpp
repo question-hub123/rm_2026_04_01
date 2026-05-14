@@ -14,8 +14,6 @@
 #include <opencv2/opencv.hpp>
 #include <cv_bridge/cv_bridge.h>
 #include <rclcpp/rclcpp.hpp>
-#include <sensor_msgs/msg/image.hpp>
-#include <geometry_msgs/msg/point.hpp>
 #include <opencv2/ml.hpp>
 #include <opencv2/dnn.hpp>
 
@@ -169,8 +167,8 @@ private:
         }
 
         cv::Mat mask2;
-        auto contours = tool_->findContours2_blue(img, mask2);
-        auto armorCornersList = tool_->drawRect3(contours, img);
+        auto contours = tool_->findContours_blue(img, mask2);
+        auto armorCornersList = tool_->drawRect(contours, img);
 
         std::vector<DetectedArmor> detections;
 
@@ -212,7 +210,7 @@ private:
 
                 int test_y = -100;
                 cv::Point text_pos(center.x - 80, center.y + test_y);
-                tool_->drawOtherArmors_ori(img, rvec, tvec);
+                tool_->drawOtherArmors(img, rvec, tvec);
                 //tool_->drawCarCenter(img, rvec, tvec);
                 std::cout<<"Yaw : "<<rvec.at<double>(0)<<" Pitch: "<<rvec.at<double>(1)<<std::endl;
                 cv::putText(img, "Yaw: " + std::to_string(yaw_target), text_pos,cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 255, 0), 2);

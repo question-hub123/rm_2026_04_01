@@ -1,104 +1,129 @@
-#include <rclcpp/logging.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <unordered_map>
-#include <string>
-#include "armor_interfaces/msg/armor.hpp"
+#include <eigen3/Eigen/Dense>
 #include "armor_interfaces/msg/armor_array.hpp"
+#include "armor_interfaces/msg/serial.hpp"
 #include "AngleKalman.hpp"
+#include "Tool.hpp"
 
-class KalmanFilterNode : public rclcpp::Node
-{
+class EKFNode : public rclcpp::Node {
 public:
-    KalmanFilterNode() : Node("kalman_filter_node")
-    {
-        RCLCPP_INFO(this->get_logger(), "卡尔曼滤波节点启动");
+    EKFNode() : Node("ekf_node") {
+        sub_armor_ = this->create_subscription<armor_interfaces::msg::ArmorArray>(
+            "armor_msgs", 10, std::bind(&EKFNode::armorCallback, this, std::placeholders::_1));
 
-        sub_ = this->create_subscription<armor_interfaces::msg::ArmorArray>(
-            "armor_msgs", 10,
-            std::bind(&KalmanFilterNode::callback, this, std::placeholders::_1));
+        sub_serial_ = this->create_subscription<armor_interfaces::msg::Serial>(
+            "serial_data", 10, [this](const armor_interfaces::msg::Serial::SharedPtr msg) {
+                last_gimbal_yaw_ = msg->yaw;
+                last_gimbal_pitch_ = msg->pitch;
+            });
 
-        // 发布滤波后的装甲板消息
-        pub_ = this->create_publisher<armor_interfaces::msg::ArmorArray>(
+        pub_filtered_ = this->create_publisher<armor_interfaces::msg::ArmorArray>(
             "armor_msgs_filtered", 10);
+
+        plot_tool_.initAnglePlot(200, cv::Vec2f(-30.f, 30.f), cv::Vec2f(-10.f, 10.f));
+        cv::startWindowThread();
+        RCLCPP_INFO(this->get_logger(), "EKF Node Started (12-dim CA model).");
     }
 
 private:
-    struct TargetInfo {
-        AngleKalman kf;                       // 卡尔曼滤波器
-        rclcpp::Time last_update_time;      // 上次更新时间
-        armor_interfaces::msg::Armor last_raw;
-    };
+    Eigen::Vector3d cameraToWorld(const Eigen::Vector3d& p_cam) {
+        return plot_tool_.cameraToWorld(p_cam, last_gimbal_yaw_, last_gimbal_pitch_);
+    }
 
-    std::unordered_map<int, TargetInfo> targets_;  // 每个 ID 的跟踪目标
+    void armorCallback(const armor_interfaces::msg::ArmorArray::SharedPtr msg) {
+        if (msg->armors.empty()) return;
 
-    rclcpp::Subscription<armor_interfaces::msg::ArmorArray>::SharedPtr sub_;
-    rclcpp::Publisher<armor_interfaces::msg::ArmorArray>::SharedPtr pub_;
+        rclcpp::Time now = msg->header.stamp;
+        if (last_time_.nanoseconds() == 0) {
+            last_time_ = now;
+            return;
+        }
 
-    void callback(const armor_interfaces::msg::ArmorArray::SharedPtr msg)
-    {
-        rclcpp::Time now = msg->header.stamp;   // 使用消息中的时间戳
-        armor_interfaces::msg::ArmorArray filtered_msg;
-        filtered_msg.header = msg->header;      // 复制原始头（时间戳、frame_id）
+        double dt = (now - last_time_).seconds();
+        last_time_ = now;
+        if (dt <= 0.0 || dt > 0.5) dt = 0.01;
 
-        // 对每个装甲板进行处理
-        for (const auto& raw : msg->armors) {
-            int id = raw.id;
-            auto it = targets_.find(id);
+        armor_interfaces::msg::ArmorArray out_msg;
+        out_msg.header = msg->header;
 
-            if (it == targets_.end()) {
-                // 新目标：初始化滤波器
-                AngleKalman kf(0.033);   // 默认 dt，实际预测时会用动态 dt
-                kf.init(raw.yaw, raw.pitch);
-                TargetInfo info = {kf, now, raw};
-                targets_[id] = info;
-                // 第一帧直接复制原始数据（或直接使用原始值）
-                filtered_msg.armors.push_back(raw);
+        bool plot_data_valid = false;
+        double raw_yaw_deg = 0.0, raw_pitch_deg = 0.0;
+        double filt_yaw_deg = 0.0, filt_pitch_deg = 0.0;
+
+        for (const auto& armor : msg->armors) {
+            Eigen::Vector3d p_cam(armor.x / 1000.0, armor.y / 1000.0, armor.z / 1000.0);
+            Eigen::Vector3d p_world = cameraToWorld(p_cam);
+
+            double abs_yaw   = armor.yaw;
+            double abs_pitch = armor.pitch;
+
+            auto it = ekf_map_.find(armor.id);
+            if (it == ekf_map_.end()) {
+                EKF ekf;
+                ekf.init(p_world, abs_yaw);
+                ekf_map_.emplace(armor.id, ekf);
                 continue;
             }
 
-            // 已存在目标：预测 + 更新
-            TargetInfo& target = it->second;
-            double dt = (now - target.last_update_time).seconds();
-            if (dt > 0.0 && dt < 0.5) {   // 防止异常时间跳变
-                target.kf.predict(dt);
+            auto& ekf = it->second;
+            ekf.predict(dt);
+            ekf.update(p_world, abs_yaw);
+
+            Eigen::Vector3d pos_c;
+            double yaw_c, v_yaw;
+            ekf.getState(pos_c, yaw_c, v_yaw);
+
+            double predict_t = 0.05;
+            double pred_x = pos_c.x() + ekf.getVx() * predict_t + 0.5 * ekf.getAx() * predict_t * predict_t;
+            double pred_y = pos_c.y() + ekf.getVy() * predict_t + 0.5 * ekf.getAy() * predict_t * predict_t;
+            double pred_z = pos_c.z() + ekf.getVz() * predict_t + 0.5 * ekf.getAz() * predict_t * predict_t;
+            double pred_yaw = yaw_c + v_yaw * predict_t + 0.5 * ekf.getAYaw() * predict_t * predict_t;
+
+            const double R = 0.25;
+            double armor_x = pred_x + R * std::sin(pred_yaw);
+            double armor_z = pred_z + R * std::cos(pred_yaw);
+            double aim_yaw   = std::atan2(armor_x, armor_z);
+            double aim_pitch = std::atan2(pred_y, std::sqrt(armor_x*armor_x + armor_z*armor_z));
+
+            armor_interfaces::msg::Armor out_armor = armor;
+            out_armor.yaw = aim_yaw;
+            out_armor.pitch = aim_pitch;
+            out_armor.yaw_filtered = aim_yaw;
+            out_armor.pitch_filtered = aim_pitch;
+            out_armor.is_predict = false;
+            out_msg.armors.push_back(out_armor);
+
+            if (!plot_data_valid) {
+                raw_yaw_deg   = abs_yaw   * 180.0 / M_PI;
+                raw_pitch_deg = abs_pitch * 180.0 / M_PI;
+                filt_yaw_deg   = aim_yaw   * 180.0 / M_PI;
+                filt_pitch_deg = aim_pitch * 180.0 / M_PI;
+                plot_data_valid = true;
             }
-            target.kf.update(raw.yaw, raw.pitch);
-            target.last_update_time = now;
-
-            // 获取滤波后的状态
-            double yaw_filt, yaw_rate, pitch_filt, pitch_rate;
-            target.kf.getState(yaw_filt, yaw_rate, pitch_filt, pitch_rate);
-
-            // 构造滤波后的消息（复制原始消息，替换滤波字段）
-            armor_interfaces::msg::Armor filtered;
-            filtered = raw;                     // 复制角点、旋转向量、原始角度等
-            filtered.yaw_filtered = yaw_filt;
-            filtered.pitch_filtered = pitch_filt;
-
-            RCLCPP_INFO(this->get_logger(),"yaw_filtered = %lf, pitch_filtered = %lf",yaw_filt, pitch_filt);
-
-            filtered_msg.armors.push_back(filtered);
         }
 
-        // 清理长时间未更新的目标（例如超过2秒）
-        auto now_clean = this->now();
-        for (auto it = targets_.begin(); it != targets_.end(); ) {
-            if ((now_clean - it->second.last_update_time).seconds() > 2.0) {
-                it = targets_.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        pub_filtered_->publish(out_msg);
 
-        pub_->publish(filtered_msg);
+        if (plot_data_valid) {
+            plot_tool_.updateAndPlotAngles(raw_yaw_deg, filt_yaw_deg,
+                                           raw_pitch_deg, filt_pitch_deg);
+        }
     }
+
+    std::unordered_map<int, EKF> ekf_map_;
+    double last_gimbal_yaw_ = 0.0, last_gimbal_pitch_ = 0.0;
+    rclcpp::Time last_time_;
+
+    rclcpp::Subscription<armor_interfaces::msg::ArmorArray>::SharedPtr sub_armor_;
+    rclcpp::Subscription<armor_interfaces::msg::Serial>::SharedPtr sub_serial_;
+    rclcpp::Publisher<armor_interfaces::msg::ArmorArray>::SharedPtr pub_filtered_;
+
+    Tool plot_tool_;
 };
 
-int main(int argc, char* argv[])
-{
+int main(int argc, char** argv) {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<KalmanFilterNode>();
-    rclcpp::spin(node);
+    rclcpp::spin(std::make_shared<EKFNode>());
     rclcpp::shutdown();
     return 0;
 }
