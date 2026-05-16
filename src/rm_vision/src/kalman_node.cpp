@@ -6,6 +6,7 @@
 #include <cmath>
 #include "Kalman.hpp"
 #include "Tool.hpp"
+#include "Monitor.hpp"
 
 using namespace std::chrono_literals;
 
@@ -37,7 +38,7 @@ public:
             "armor_msgs_filtered", 10);
 
         // 曲线绘图（显示世界绝对角度）
-        plot_tool_.initAnglePlot(200, cv::Vec2f(-40.f, 40.f), cv::Vec2f(-40.f, 40.f));
+        plot_monitor_.initAnglePlot(200, cv::Vec2f(-40.f, 40.f), cv::Vec2f(-40.f, 40.f));
         cv::startWindowThread();
     }
 
@@ -56,7 +57,8 @@ private:
     rclcpp::Subscription<armor_interfaces::msg::ArmorArray>::SharedPtr sub_armor_;
     rclcpp::Subscription<armor_interfaces::msg::Serial>::SharedPtr sub_serial_;
     rclcpp::Publisher<armor_interfaces::msg::ArmorArray>::SharedPtr pub_filtered_;
-    Tool plot_tool_;
+    Monitor plot_monitor_;
+    Tool tarnsform_tool_;
 
     std::unordered_map<int, TargetInfo> targets_;
     double last_gimbal_yaw_ = 0.0;
@@ -96,7 +98,7 @@ private:
 
             // 相机坐标系 -> 世界坐标系
             Eigen::Vector3d p_cam(raw.x, raw.y, raw.z);
-            Eigen::Vector3d p_world = plot_tool_.cameraToWorld(p_cam, last_gimbal_yaw_, last_gimbal_pitch_);
+            Eigen::Vector3d p_world = tarnsform_tool_.cameraToWorld(p_cam, last_gimbal_yaw_, last_gimbal_pitch_);
 
             // 计算绝对角度（世界系）
             double yaw_abs_world   = std::atan2(p_world.y(), p_world.x());
@@ -204,7 +206,7 @@ private:
         // 绘图（显示当前滤波值，不显示预测值，便于观察）
         if (has_plot_data)
         {
-            plot_tool_.updateAndPlotAngles(raw_yaw_world_deg, filt_yaw_world_deg,
+            plot_monitor_.updateAndPlotAngles(raw_yaw_world_deg, filt_yaw_world_deg,
                                            raw_pitch_world_deg, filt_pitch_world_deg);
         }
     }

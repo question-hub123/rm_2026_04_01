@@ -14,6 +14,8 @@
 #include "OpenvinoInfer.h"   // 需包含 DetectedArmor 等
 #include "Pnp.hpp"
 #include "EKF.hpp"
+#include "Monitor.hpp"
+#include "Tool.hpp"
 
 using namespace std::chrono_literals;
 
@@ -82,6 +84,7 @@ private:
     rclcpp::Publisher<armor_interfaces::msg::ArmorArray>::SharedPtr pub_;
     rclcpp::Subscription<armor_interfaces::msg::Serial>::SharedPtr sub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    Tool tool_;
 
     // 视频
     cv::VideoCapture cap_;
@@ -156,14 +159,24 @@ private:
             double yaw_rad, pitch_rad, distance;
             if (pnp_solver_->solveWithPose(image_points, rvec, tvec, yaw_rad, pitch_rad, distance)) {
                 Detection det;
+
+                Eigen::Vector3d pos_cam(tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2)); // 相机系位置
+                Eigen::Vector3d pos_world = tool_.cameraToWorld(pos_cam, gimbal_yaw_.load(), gimbal_pitch_.load());
+
                 for (int k = 0; k < 4; ++k) det.corners[k] = vertices[k];
-                det.x     = tvec.at<double>(0);   // 米
-                det.y     = tvec.at<double>(1);
-                det.z     = tvec.at<double>(2);
-                det.yaw   = -yaw_rad;             // 注意符号，与原始模板保持一致
-                det.pitch = -pitch_rad;
-                det.number = armor.number;
-                detections.push_back(det);
+                {
+                    det.x     = pos_world.x();   // 米
+                    det.y     = pos_world.y();
+                    det.z     = pos_world.z();
+
+                    double world_yaw, world_pitch;
+                    tool_.cameraNormalToWorld(rvec, gimbal_yaw_.load(), gimbal_pitch_.load(), world_yaw, world_pitch);
+
+                    det.yaw   = world_yaw;             // 注意符号，与原始模板保持一致
+                    det.pitch = world_pitch;
+                    det.number = armor.number;
+                    detections.push_back(det);
+                }
             }
         }
 
@@ -241,7 +254,9 @@ private:
                 tt.ekf->init(pos_obs, yaw_obs);
                 tt.ekf_initialized = true;
             } else {
-                tt.ekf->update(pos_obs, yaw_obs);
+                Eigen::Vector4d z;
+                z << pos_obs.x(), pos_obs.y(), pos_obs.z(), yaw_obs;
+                tt.ekf->update(z);
             }
 
             curr_targets.push_back(std::move(tt));
@@ -258,6 +273,7 @@ private:
         double cur_gimbal_yaw   = gimbal_yaw_.load();
         double cur_gimbal_pitch = gimbal_pitch_.load();
 
+
         for (size_t i = 0; i < detections.size(); ++i) {
             int id = assigned_ids[i];
             // 从 curr_targets 中获取 EKF 滤波后的状态（仅用于可能的滤波输出）
@@ -271,18 +287,19 @@ private:
             double pitch_rel = detections[i].pitch;
 
             // 绝对角度
-            double abs_yaw   = cur_gimbal_yaw + yaw_rel;
-            double abs_pitch = cur_gimbal_pitch + pitch_rel;
+            double abs_yaw   = yaw_rel;
+            double abs_pitch = pitch_rel;
 
             // 打包消息（单位：米，弧度）
             armor_interfaces::msg::Armor armor_msg;
-            armor_msg.id              = id;
-            armor_msg.x               = x_raw;          // 相机系下位置（米）
+            armor_msg.id              = detections[i].number; // 数字类别作为 ID，或使用 assigned_ids[i] 作为跟踪 ID
+            armor_msg.x               = x_raw;         // 世界坐标下位置（米）
             armor_msg.y               = y_raw;
             armor_msg.z               = z_raw;
+            
             armor_msg.yaw             = abs_yaw;        // 绝对角度（弧度）
             armor_msg.pitch           = abs_pitch;
-            armor_msg.yaw_filtered    = abs_yaw;        // 若无额外滤波，直接填绝对角度
+            armor_msg.yaw_filtered    = abs_yaw;        // 未滤波，流程有点不完美，后续滤波值在EKF_node中完善
             armor_msg.pitch_filtered  = abs_pitch;
             armor_msg.is_predict      = false;
 
@@ -290,11 +307,15 @@ private:
             if (it != prev_targets_.end() && it->ekf_initialized) {
                 Eigen::Vector3d pos_c;
                 double yaw_est, v_yaw, r;
-                it->ekf->getState(pos_c, yaw_est, v_yaw, r);
+                pos_c = it->ekf->getVehiclePosition();   // Eigen::Vector3d
+                yaw_est = it->ekf->getContinuousYaw();   // double
+                v_yaw = it->ekf->x(7);                   // 偏航角速度
+                r = it->ekf->getRadius();               // double
                 // 这里 pos_c 是车体中心，不是装甲板位置，仅做演示，不做覆盖
             }
 
             armor_array_msg.armors.push_back(armor_msg);
+            if(detections.empty()) { armor_array_msg.armors.clear(); }
         }
 
         pub_->publish(armor_array_msg);
@@ -331,11 +352,18 @@ private:
                                        [&](const TrackedTarget &t) { return t.id == id; });
                 if (it != prev_targets_.end() && it->ekf_initialized) {
                     Eigen::Vector3d pos_c;
-                    double yaw_est, v, r;
-                    it->ekf->getState(pos_c, yaw_est, v, r);
+                    double yaw_est, v_yaw, r;
+                    pos_c = it->ekf->getVehiclePosition();   // Eigen::Vector3d
+                    yaw_est = it->ekf->getContinuousYaw();   // double
+                    v_yaw = it->ekf->x(7);                   // 偏航角速度
+                    r = it->ekf->getRadius();               // double
+
+                    /*tool_.drawAllArmors(frame, pos_c, yaw_est, r, det.number);
                     cv::putText(frame, cv::format("EKFX:%.2f Y:%.2f Yaw:%.1f", pos_c.x(), pos_c.y(), yaw_est*180/M_PI),
-                                cv::Point(10, 30 + 20*id), cv::FONT_HERSHEY_SIMPLEX,
-                                0.5, cv::Scalar(0,255,255), 1);
+                                cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX,
+                                0.5, cv::Scalar(0,255,255), 1);*/
+
+                    tool_.drawVehicleCenter(frame, pos_c);
                 }
             }
 

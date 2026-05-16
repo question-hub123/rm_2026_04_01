@@ -1,57 +1,49 @@
-#pragma once
+#ifndef EKF_9D_HPP
+#define EKF_9D_HPP
+
 #include <eigen3/Eigen/Dense>
 #include <cmath>
 
 class EKF {
 public:
-    EKF();
+    // 状态向量: [xc, vxc, yc, vyc, za, vza, yaw, v_yaw, r]^T
+    // xc, yc: 车体中心在世界坐标系下的X, Y坐标
+    // za: 装甲板的高度 (Z坐标)
+    // yaw: 车体朝向角 (连续化, 非 -pi~pi)
+    // r: 旋转半径 (装甲板到车体中心的距离)
+    Eigen::Matrix<double, 9, 1> x;
+    Eigen::Matrix<double, 9, 9> P;
+    Eigen::Matrix<double, 9, 9> F;
+    Eigen::Matrix<double, 4, 9> H;
+    Eigen::Matrix<double, 9, 9> Q;
+    Eigen::Matrix<double, 4, 4> R;
 
-    // 初始化：传入观测到的装甲板世界坐标 (m) 和世界系装甲板朝向 (rad)
-    void init(const Eigen::Vector3d& p_armor, double yaw_abs);
-
-    // 预测：匀加速模型，dt 为时间间隔 (s)
-    void predict(double dt);
-
-    // 更新：观测装甲板的世界坐标和世界系朝向
-    void update(const Eigen::Vector3d& p_armor, double yaw_abs);
-
-    // 获取滤波后的车体状态（位置、偏航、角速度、半径）
-    void getState(Eigen::Vector3d& pos_c, double& yaw, double& v_yaw, double& r) const;
-
-    // 访问接口
-    double getVx()    const { return X_(IDX_VX); }
-    double getVy()    const { return X_(IDX_VY); }
-    double getVz()    const { return X_(IDX_VZ); }
-    double getAx()    const { return X_(IDX_AX); }
-    double getAy()    const { return X_(IDX_AY); }
-    double getAz()    const { return X_(IDX_AZ); }
-    double getAYaw()  const { return X_(IDX_AYAW); }
-    double getR()     const { return X_(IDX_R); }
-
-    bool isInitialized() const { return initialized_; }
-
-private:
     bool initialized_;
 
-    // 状态索引 (13 维)
-    static constexpr int IDX_X    = 0;
-    static constexpr int IDX_Y    = 1;
-    static constexpr int IDX_Z    = 2;
-    static constexpr int IDX_VX   = 3;
-    static constexpr int IDX_VY   = 4;
-    static constexpr int IDX_VZ   = 5;
-    static constexpr int IDX_AX   = 6;
-    static constexpr int IDX_AY   = 7;
-    static constexpr int IDX_AZ   = 8;
-    static constexpr int IDX_YAW  = 9;
-    static constexpr int IDX_VYAW = 10;
-    static constexpr int IDX_AYAW = 11;
-    static constexpr int IDX_R    = 12;   // 车体半径
+    EKF();
 
-    Eigen::VectorXd X_;                     // 13 维状态
-    Eigen::MatrixXd P_;                     // 13x13 协方差
-    Eigen::MatrixXd Q_;                     // 13x13 过程噪声
-    Eigen::MatrixXd R_;                     // 4x4  测量噪声
+    void init(const Eigen::Vector3d& p_armor, double armor_yaw, double r0 = 0.26);
 
-    double normalizeAngle(double angle) const;
+    void predict(double dt);
+
+    void update(const Eigen::Vector4d& z);
+
+    // 从当前状态反推装甲板在世界系下的坐标
+    Eigen::Vector3d getArmorPosition() const;
+
+    // 获取滤波后的车体中心位置
+    Eigen::Vector3d getVehiclePosition() const;
+
+    // 获取当前估计的半径
+    double getRadius() const;
+
+    // 获取连续化后的车体yaw (可能超出-pi~pi, 但代表累计转角)
+    double getContinuousYaw() const;
+
+    static double normalizeAngle(double angle);
+    
+    // 用于连续化观测yaw的辅助函数
+    static double shortestAngularDistance(double from, double to);
 };
+
+#endif

@@ -288,47 +288,37 @@ public:
         }
     }
 
-    void initAnglePlot(size_t max_history = 200,
-                       cv::Vec2f yaw_range = cv::Vec2f(-30.f, 30.f),
-                       cv::Vec2f pitch_range = cv::Vec2f(-10.f, 10.f))
+    void drawVehicleCenter(cv::Mat& img, const Eigen::Vector3d& center_world) const
     {
-        max_history_ = max_history;
-        yaw_range_ = yaw_range;
-        pitch_range_ = pitch_range;
-        plot_yaw_   = cv::Mat::zeros(480, 640, CV_8UC3);
-        plot_pitch_ = cv::Mat::zeros(480, 640, CV_8UC3);
-    }
+        // ===== 世界系 → 相机系 逆变换 =====
+        // 你的 cameraToWorld: x_w = z_c, y_w = -x_c, z_w = -y_c
+        // 逆映射：x_c = -y_w, y_c = -z_w, z_c = x_w
+        Eigen::Vector3d center_cam;
+        center_cam.x() = -center_world.y();
+        center_cam.y() = -center_world.z();
+        center_cam.z() =  center_world.x();
 
-    /**
-     * @brief 每帧更新并显示曲线（在主循环中调用，注意不要与其它 imshow/waitKey 冲突）
-     * @param raw_yaw        原始绝对 yaw（度）
-     * @param filtered_yaw   卡尔曼滤波后的 yaw（度）
-     * @param raw_pitch      原始绝对 pitch（度）
-     * @param filtered_pitch 卡尔曼滤波后的 pitch（度）
-     */
-    void updateAndPlotAngles(double raw_yaw, double filtered_yaw,
-                             double raw_pitch, double filtered_pitch)
-    {
-        // 更新缓冲区（保持最大长度）
-        raw_yaw_history_.push_back(raw_yaw);
-        filtered_yaw_history_.push_back(filtered_yaw);
-        raw_pitch_history_.push_back(raw_pitch);
-        filtered_pitch_history_.push_back(filtered_pitch);
+        cv::Mat K = (cv::Mat_<double>(3,3) <<
+        1296.16167, 0.0,        643.60901,
+        0.0,        1296.23028, 509.49319,
+        0.0,        0.0,        1.0);
 
-        if (raw_yaw_history_.size() > max_history_)       raw_yaw_history_.pop_front();
-        if (filtered_yaw_history_.size() > max_history_) filtered_yaw_history_.pop_front();
-        if (raw_pitch_history_.size() > max_history_)     raw_pitch_history_.pop_front();
-        if (filtered_pitch_history_.size() > max_history_) filtered_pitch_history_.pop_front();
+        // 深度检查
+        if (center_cam.z() <= 0.1) return;  // 点在相机后方或太近，不绘制
 
-        // 绘制 yaw 曲线
-        drawSingleCurve(plot_yaw_, raw_yaw_history_, filtered_yaw_history_,
-                        "Yaw (deg)", yaw_range_);
-        // 绘制 pitch 曲线
-        drawSingleCurve(plot_pitch_, raw_pitch_history_, filtered_pitch_history_,
-                        "Pitch (deg)", pitch_range_);
+        // 投影到像素坐标
+        double fx = K.at<double>(0,0);
+        double fy = K.at<double>(1,1);
+        double cx = K.at<double>(0,2);
+        double cy = K.at<double>(1,2);
+        double u = fx * center_cam.x() / center_cam.z() + cx;
+        double v = fy * center_cam.y() / center_cam.z() + cy;
+        cv::Point2f px(static_cast<float>(u), static_cast<float>(v));
 
-        cv::imshow("Yaw Curve", plot_yaw_);
-        cv::imshow("Pitch Curve", plot_pitch_);
+        // 绘制红色实心圆 + 文字
+        cv::circle(img, px, 8, cv::Scalar(0, 0, 255), -1);
+        cv::putText(img, "CarCtr", px + cv::Point2f(10, -10),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 0, 255), 2);
     }
 
     Eigen::Vector3d cameraToWorld(const Eigen::Vector3d& pos_cam, double curr_yaw, double curr_pitch) 
@@ -362,75 +352,126 @@ public:
         return p_world;
     }
 
-private:
-    // 绘制一张曲线图（内部辅助）
-    void drawSingleCurve(cv::Mat& canvas,
-                         const std::deque<double>& raw_hist,
-                         const std::deque<double>& filt_hist,
-                         const std::string& title,
-                         cv::Vec2f range)
+    Eigen::Matrix3d get_R_gimbal2world(double gimbal_yaw, double gimbal_pitch) const
     {
-        canvas.setTo(cv::Scalar(0, 0, 0));   // 黑色背景
-
-        int w = canvas.cols;
-        int h = canvas.rows;
-        float min_val = range[0];
-        float max_val = range[1];
-        float scale_x = static_cast<float>(w) / (max_history_ > 1 ? max_history_ : 1);
-        float scale_y = static_cast<float>(h) / (max_val - min_val);
-
-        // 中线
-        cv::line(canvas, cv::Point(0, h/2), cv::Point(w, h/2), cv::Scalar(50,50,50), 1);
-        // 标题
-        cv::putText(canvas, title, cv::Point(10, 30),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255,255,255), 2);
-
-        // 画原始角度曲线（蓝色）
-        drawLineSeries(canvas, raw_hist, scale_x, scale_y, h, min_val, cv::Scalar(255,0,0));
-        // 画滤波角度曲线（绿色）
-        drawLineSeries(canvas, filt_hist, scale_x, scale_y, h, min_val, cv::Scalar(0,255,0));
-
-        // 图例
-        cv::putText(canvas, "Raw", cv::Point(w-120,30),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,0,0), 2);
-        cv::putText(canvas, "Filtered", cv::Point(w-120,60),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0,255,0), 2);
+        Eigen::Matrix3d R_gimbal2world;
+        R_gimbal2world = Eigen::AngleAxisd(gimbal_yaw,   Eigen::Vector3d::UnitZ())  // 绕 Z 轴旋转 yaw
+               * Eigen::AngleAxisd(gimbal_pitch, Eigen::Vector3d::UnitY())  // 绕 Y 轴旋转 pitch
+               * Eigen::AngleAxisd(0.0,          Eigen::Vector3d::UnitX()); // roll = 0
+        return R_gimbal2world;
     }
 
-    void drawLineSeries(cv::Mat& img, const std::deque<double>& data,
-                        float scale_x, float scale_y, int img_h, float min_val,
-                        cv::Scalar color)
+
+    void drawAllArmors(cv::Mat& img, const Eigen::Vector3d& vehicle_center_world,
+                   double vehicle_yaw_world, double radius, int detected_number)
     {
-        if (data.size() < 2) return;
-        for (size_t i = 1; i < data.size(); ++i)
-        {
-            int x1 = static_cast<int>((i-1) * scale_x);
-            int y1 = static_cast<int>(img_h - (data[i-1] - min_val) * scale_y);
-            int x2 = static_cast<int>(i * scale_x);
-            int y2 = static_cast<int>(img_h - (data[i] - min_val) * scale_y);
+        // ---------- 参数 ----------
+        const double ARMOR_W = 0.135;   // 小装甲板宽度 (m)
+        const double ARMOR_H = 0.055;   // 装甲板高度 (m)
 
-            // 边界裁剪
-            x1 = std::max(0, std::min(x1, img.cols-1));
-            y1 = std::max(0, std::min(y1, img.rows-1));
-            x2 = std::max(0, std::min(x2, img.cols-1));
-            y2 = std::max(0, std::min(y2, img.rows-1));
+        // 相机内参 (与 PnP 使用的一致)
+        const cv::Mat K = (cv::Mat_<double>(3,3) <<
+            1296.16167, 0.0,        643.60901,
+            0.0,        1296.23028, 509.49319,
+            0.0,        0.0,        1.0);
 
-            cv::line(img, cv::Point(x1, y1), cv::Point(x2, y2), color, 2);
+        // ========== 世界系 → 相机系 逆变换 ==========
+        // 你的 cameraToWorld 映射：x_w = z_c, y_w = -x_c, z_w = -y_c
+        // 逆映射：x_c = -y_w, y_c = -z_w, z_c = x_w
+        double xc = -vehicle_center_world.y();
+        double yc = -vehicle_center_world.z();
+        double zc =  vehicle_center_world.x();
+        Eigen::Vector3d vehicle_center_cam(xc, yc, zc);
+
+        // 世界系 yaw 到相机系 yaw 的转换（可能需要微调，此处先直接传递）
+        // 如果你的显示方向不对，可尝试加减 M_PI/2，例如：
+        // double yaw_cam = vehicle_yaw_world + M_PI_2;  // 或 - M_PI_2
+        double yaw_cam = vehicle_yaw_world;  // 先保持不变，根据实际效果调整
+
+        // 以下使用相机系坐标进行重投影，逻辑与原 drawOtherArmors 相同
+        double cx = vehicle_center_cam.x();
+        double cy = vehicle_center_cam.y();
+        double cz = vehicle_center_cam.z();
+
+        // 数字到装甲板面的映射（0-正面，1-左侧，2-后侧，3-右侧）
+        int current_face = 0;
+        if (detected_number == 2) current_face = 1;
+        else if (detected_number == 3) current_face = 2;
+        else if (detected_number == 4 || detected_number == 5) current_face = 3;
+
+        for (int i = 0; i < 4; ++i) {
+            double face_yaw = yaw_cam + i * (CV_PI / 2.0);
+
+            // 装甲板中心（相机系）
+            double board_cx = cx + radius * std::sin(face_yaw);
+            double board_cy = cy;   // 高度不变
+            double board_cz = cz + radius * std::cos(face_yaw);
+
+            // 装甲板角点（OpenCV坐标系：X右, Y下, Z前）
+            double cos_y = std::cos(face_yaw);
+            double sin_y = std::sin(face_yaw);
+            cv::Point3d w_vec(cos_y * (ARMOR_W / 2.0), 0.0, -sin_y * (ARMOR_W / 2.0));
+            cv::Point3d h_vec(0.0, ARMOR_H / 2.0, 0.0);
+
+            std::vector<cv::Point3d> corners = {
+                cv::Point3d(board_cx, board_cy, board_cz) - w_vec - h_vec, // 左上
+                cv::Point3d(board_cx, board_cy, board_cz) + w_vec - h_vec, // 右上
+                cv::Point3d(board_cx, board_cy, board_cz) + w_vec + h_vec, // 右下
+                cv::Point3d(board_cx, board_cy, board_cz) - w_vec + h_vec  // 左下
+            };
+
+            // 投影到图像
+            std::vector<cv::Point2f> img_pts;
+            bool valid = true;
+            for (const auto& pt : corners) {
+                if (pt.z <= 0.1) {
+                    valid = false;
+                    break;
+                }
+                float u = K.at<double>(0,0) * pt.x / pt.z + K.at<double>(0,2);
+                float v = K.at<double>(1,1) * pt.y / pt.z + K.at<double>(1,2);
+                img_pts.push_back(cv::Point2f(u, v));
+            }
+
+            if (valid) {
+                // 当前检测到的装甲板面画绿色，其他画蓝色
+                cv::Scalar color = (i == current_face) ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 0, 0);
+                int thickness = (i == current_face) ? 3 : 2;
+                for (int j = 0; j < 4; ++j)
+                    cv::line(img, img_pts[j], img_pts[(j+1)%4], color, thickness, cv::LINE_AA);
+            }
         }
     }
+    
+    void cameraNormalToWorld(const cv::Mat& rvec,
+                            double gimbal_yaw, double gimbal_pitch,
+                            double& world_yaw, double& world_pitch) const
+    {
+        // 1. 相机系法线 (装甲板平面指向外侧) ：Z轴方向
+        cv::Mat rmat;
+        cv::Rodrigues(rvec, rmat);
+        cv::Mat normal_cam = rmat * (cv::Mat_<double>(3,1) << 0, 0, 1);
 
-    // 历史数据队列（环形）
-    std::deque<double> raw_yaw_history_;
-    std::deque<double> filtered_yaw_history_;
-    std::deque<double> raw_pitch_history_;
-    std::deque<double> filtered_pitch_history_;
+        Eigen::Vector3d n_cam(normal_cam.at<double>(0),
+                            normal_cam.at<double>(1),
+                            normal_cam.at<double>(2));
 
-    // 绘图参数
-    size_t max_history_ = 200;                     // 曲线最多显示点数
-    cv::Vec2f yaw_range_   = cv::Vec2f(-30.f, 30.f);   // yaw 显示范围（度）
-    cv::Vec2f pitch_range_ = cv::Vec2f(-10.f, 10.f);   // pitch 显示范围（度）
+        // 2. 坐标轴重映射：相机系 (x右,y下,z前) → 云台初始系 (x前,y左,z上)
+        //    对应关系：x_gimbal = z_c, y_gimbal = -x_c, z_gimbal = -y_c
+        Eigen::Matrix3d R_cam2gimbal_init;
+        R_cam2gimbal_init << 0,  0,  1,
+                            -1,  0,  0,
+                            0, -1,  0;
+        Eigen::Vector3d n_gimbal = R_cam2gimbal_init * n_cam;
 
-    // 绘图画布
-    cv::Mat plot_yaw_;
-    cv::Mat plot_pitch_;
+        // 3. 云台当前姿态旋转矩阵 (gimbal → world)
+        Eigen::Matrix3d R_gimbal2world = get_R_gimbal2world(gimbal_yaw, gimbal_pitch);
+
+        // 4. 世界系法线
+        Eigen::Vector3d n_world = R_gimbal2world * n_gimbal;
+
+        // 5. 从世界系法线提取 yaw / pitch
+        world_yaw   = std::atan2(n_world.y(), n_world.x());
+        world_pitch = std::asin(n_world.z());
+    }
 };
