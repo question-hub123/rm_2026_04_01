@@ -288,15 +288,21 @@ public:
         }
     }
 
-    void drawVehicleCenter(cv::Mat& img, const Eigen::Vector3d& center_world) const
+    // 修复 1：引入云台逆旋转
+    void drawVehicleCenter(cv::Mat& img, const Eigen::Vector3d& center_world, 
+                           double gimbal_yaw, double gimbal_pitch) const
     {
-        // ===== 世界系 → 相机系 逆变换 =====
-        // 你的 cameraToWorld: x_w = z_c, y_w = -x_c, z_w = -y_c
-        // 逆映射：x_c = -y_w, y_c = -z_w, z_c = x_w
+        // 1. 世界系 → 云台初始系 (乘以逆旋转矩阵 R^T)
+        Eigen::Matrix3d R_gimbal2world = get_R_gimbal2world(gimbal_yaw, gimbal_pitch);
+        Eigen::Vector3d center_gimbal = R_gimbal2world.transpose() * center_world;
+
+        // 2. 云台初始系 → 相机系 (逆映射)
+        // 原映射：x_g = z_c, y_g = -x_c, z_g = -y_c
+        // 逆映射：x_c = -y_g, y_c = -z_g, z_c = x_g
         Eigen::Vector3d center_cam;
-        center_cam.x() = -center_world.y();
-        center_cam.y() = -center_world.z();
-        center_cam.z() =  center_world.x();
+        center_cam.x() = -center_gimbal.y();
+        center_cam.y() = -center_gimbal.z();
+        center_cam.z() =  center_gimbal.x();
 
         cv::Mat K = (cv::Mat_<double>(3,3) <<
         1296.16167, 0.0,        643.60901,
@@ -304,7 +310,7 @@ public:
         0.0,        0.0,        1.0);
 
         // 深度检查
-        if (center_cam.z() <= 0.1) return;  // 点在相机后方或太近，不绘制
+        if (center_cam.z() <= 0.1) return;
 
         // 投影到像素坐标
         double fx = K.at<double>(0,0);
@@ -319,6 +325,77 @@ public:
         cv::circle(img, px, 8, cv::Scalar(0, 0, 255), -1);
         cv::putText(img, "CarCtr", px + cv::Point2f(10, -10),
                     cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 0, 255), 2);
+    }
+
+    // 修复 2：完全在世界系下构建 3D 轮廓，再投影回相机
+    void drawAllArmors(cv::Mat& img, const Eigen::Vector3d& vehicle_center_world,
+                       double vehicle_yaw_world, double radius, double zp_offset, 
+                       int current_face, double gimbal_yaw, double gimbal_pitch) const
+    {
+        const double ARMOR_W = 0.135;   // 小装甲板宽
+        const double ARMOR_H = 0.055;   // 装甲板高
+
+        const cv::Mat K = (cv::Mat_<double>(3,3) <<
+            1296.16167, 0.0,        643.60901,
+            0.0,        1296.23028, 509.49319,
+            0.0,        0.0,        1.0);
+
+        Eigen::Matrix3d R_gimbal2world = get_R_gimbal2world(gimbal_yaw, gimbal_pitch);
+        Eigen::Matrix3d R_world2gimbal = R_gimbal2world.transpose();
+
+        // 循环绘制四块板
+        for (int i = 0; i < 4; ++i) {
+            // 1. 计算当前板在世界系下的绝对 Yaw
+            double face_yaw = vehicle_yaw_world + i * (CV_PI / 2.0);
+
+            // 2. 世界系下装甲板的中心点 (Z轴朝上，计算非常直观)
+            Eigen::Vector3d board_center_world;
+            board_center_world.x() = vehicle_center_world.x() + radius * std::cos(face_yaw);
+            board_center_world.y() = vehicle_center_world.y() + radius * std::sin(face_yaw);
+            board_center_world.z() = vehicle_center_world.z() + zp_offset; // 加入装甲板高度偏移
+
+            // 3. 计算世界系下的四个角点
+            // 装甲板的宽度向量（垂直于法线，在XY平面）
+            Eigen::Vector3d w_vec(-std::sin(face_yaw) * (ARMOR_W / 2.0), 
+                                   std::cos(face_yaw) * (ARMOR_W / 2.0), 
+                                   0.0);
+            // 装甲板的高度向量（就是世界系的Z轴）
+            Eigen::Vector3d h_vec(0.0, 0.0, ARMOR_H / 2.0);
+
+            std::vector<Eigen::Vector3d> corners_world = {
+                board_center_world - w_vec + h_vec, // 左上
+                board_center_world + w_vec + h_vec, // 右上
+                board_center_world + w_vec - h_vec, // 右下
+                board_center_world - w_vec - h_vec  // 左下
+            };
+
+            // 4. 将点从世界系 -> 云台系 -> 相机系，并投影
+            std::vector<cv::Point2f> img_pts;
+            bool valid = true;
+            for (const auto& pt_w : corners_world) {
+                // 转回云台系
+                Eigen::Vector3d pt_g = R_world2gimbal * pt_w;
+                // 转回相机系 (x_c = -y_g, y_c = -z_g, z_c = x_g)
+                Eigen::Vector3d pt_c(-pt_g.y(), -pt_g.z(), pt_g.x());
+
+                if (pt_c.z() <= 0.1) {
+                    valid = false;
+                    break;
+                }
+                float u = K.at<double>(0,0) * pt_c.x() / pt_c.z() + K.at<double>(0,2);
+                float v = K.at<double>(1,1) * pt_c.y() / pt_c.z() + K.at<double>(1,2);
+                img_pts.push_back(cv::Point2f(u, v));
+            }
+
+            // 5. 绘制
+            if (valid) {
+                cv::Scalar color = (i == current_face) ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 0, 0);
+                int thickness = (i == current_face) ? 3 : 2;
+                for (int j = 0; j < 4; ++j) {
+                    cv::line(img, img_pts[j], img_pts[(j+1)%4], color, thickness, cv::LINE_AA);
+                }
+            }
+        }
     }
 
     Eigen::Vector3d cameraToWorld(const Eigen::Vector3d& pos_cam, double curr_yaw, double curr_pitch) 
@@ -361,87 +438,6 @@ public:
         return R_gimbal2world;
     }
 
-
-    void drawAllArmors(cv::Mat& img, const Eigen::Vector3d& vehicle_center_world,
-                   double vehicle_yaw_world, double radius, int detected_number)
-    {
-        // ---------- 参数 ----------
-        const double ARMOR_W = 0.135;   // 小装甲板宽度 (m)
-        const double ARMOR_H = 0.055;   // 装甲板高度 (m)
-
-        // 相机内参 (与 PnP 使用的一致)
-        const cv::Mat K = (cv::Mat_<double>(3,3) <<
-            1296.16167, 0.0,        643.60901,
-            0.0,        1296.23028, 509.49319,
-            0.0,        0.0,        1.0);
-
-        // ========== 世界系 → 相机系 逆变换 ==========
-        // 你的 cameraToWorld 映射：x_w = z_c, y_w = -x_c, z_w = -y_c
-        // 逆映射：x_c = -y_w, y_c = -z_w, z_c = x_w
-        double xc = -vehicle_center_world.y();
-        double yc = -vehicle_center_world.z();
-        double zc =  vehicle_center_world.x();
-        Eigen::Vector3d vehicle_center_cam(xc, yc, zc);
-
-        // 世界系 yaw 到相机系 yaw 的转换（可能需要微调，此处先直接传递）
-        // 如果你的显示方向不对，可尝试加减 M_PI/2，例如：
-        // double yaw_cam = vehicle_yaw_world + M_PI_2;  // 或 - M_PI_2
-        double yaw_cam = vehicle_yaw_world;  // 先保持不变，根据实际效果调整
-
-        // 以下使用相机系坐标进行重投影，逻辑与原 drawOtherArmors 相同
-        double cx = vehicle_center_cam.x();
-        double cy = vehicle_center_cam.y();
-        double cz = vehicle_center_cam.z();
-
-        // 数字到装甲板面的映射（0-正面，1-左侧，2-后侧，3-右侧）
-        int current_face = 0;
-        if (detected_number == 2) current_face = 1;
-        else if (detected_number == 3) current_face = 2;
-        else if (detected_number == 4 || detected_number == 5) current_face = 3;
-
-        for (int i = 0; i < 4; ++i) {
-            double face_yaw = yaw_cam + i * (CV_PI / 2.0);
-
-            // 装甲板中心（相机系）
-            double board_cx = cx + radius * std::sin(face_yaw);
-            double board_cy = cy;   // 高度不变
-            double board_cz = cz + radius * std::cos(face_yaw);
-
-            // 装甲板角点（OpenCV坐标系：X右, Y下, Z前）
-            double cos_y = std::cos(face_yaw);
-            double sin_y = std::sin(face_yaw);
-            cv::Point3d w_vec(cos_y * (ARMOR_W / 2.0), 0.0, -sin_y * (ARMOR_W / 2.0));
-            cv::Point3d h_vec(0.0, ARMOR_H / 2.0, 0.0);
-
-            std::vector<cv::Point3d> corners = {
-                cv::Point3d(board_cx, board_cy, board_cz) - w_vec - h_vec, // 左上
-                cv::Point3d(board_cx, board_cy, board_cz) + w_vec - h_vec, // 右上
-                cv::Point3d(board_cx, board_cy, board_cz) + w_vec + h_vec, // 右下
-                cv::Point3d(board_cx, board_cy, board_cz) - w_vec + h_vec  // 左下
-            };
-
-            // 投影到图像
-            std::vector<cv::Point2f> img_pts;
-            bool valid = true;
-            for (const auto& pt : corners) {
-                if (pt.z <= 0.1) {
-                    valid = false;
-                    break;
-                }
-                float u = K.at<double>(0,0) * pt.x / pt.z + K.at<double>(0,2);
-                float v = K.at<double>(1,1) * pt.y / pt.z + K.at<double>(1,2);
-                img_pts.push_back(cv::Point2f(u, v));
-            }
-
-            if (valid) {
-                // 当前检测到的装甲板面画绿色，其他画蓝色
-                cv::Scalar color = (i == current_face) ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 0, 0);
-                int thickness = (i == current_face) ? 3 : 2;
-                for (int j = 0; j < 4; ++j)
-                    cv::line(img, img_pts[j], img_pts[(j+1)%4], color, thickness, cv::LINE_AA);
-            }
-        }
-    }
     
     void cameraNormalToWorld(const cv::Mat& rvec,
                             double gimbal_yaw, double gimbal_pitch,
@@ -450,7 +446,7 @@ public:
         // 1. 相机系法线 (装甲板平面指向外侧) ：Z轴方向
         cv::Mat rmat;
         cv::Rodrigues(rvec, rmat);
-        cv::Mat normal_cam = rmat * (cv::Mat_<double>(3,1) << 0, 0, 1);
+        cv::Mat normal_cam = rmat * (cv::Mat_<double>(3,1) << 0, 0, -1);
 
         Eigen::Vector3d n_cam(normal_cam.at<double>(0),
                             normal_cam.at<double>(1),
