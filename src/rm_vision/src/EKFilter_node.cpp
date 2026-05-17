@@ -9,7 +9,6 @@
 #include <float.h>
 #include <cmath>
 
-
 using namespace std::chrono_literals;
 using std::placeholders::_1;
 
@@ -181,10 +180,15 @@ private:
                 matched = true;
                 matched_armor = candidates[best_cand];
                 // 更新 EKF
-                Eigen::Vector4d z;
-                z << matched_armor.x, matched_armor.y, matched_armor.z, getContinuousArmorYaw(matched_armor);
+                double obs_yaw = std::atan2(matched_armor.y, matched_armor.x);
+                double obs_pitch = std::atan2(matched_armor.z, std::sqrt(matched_armor.x*matched_armor.x + matched_armor.y*matched_armor.y));
+                double obs_dist = std::sqrt(matched_armor.x*matched_armor.x + matched_armor.y*matched_armor.y + matched_armor.z*matched_armor.z);
+                double obs_armor_yaw = getContinuousArmorYaw(matched_armor);
+                Eigen::Vector4d z(obs_yaw, obs_pitch, obs_dist, obs_armor_yaw);
                 ekf_.update(z);
-            } else if (candidates.size() == 1 && best_yaw_diff > max_match_yaw_diff_) {
+
+            } 
+            else if (candidates.size() == 1 && best_yaw_diff > max_match_yaw_diff_) {
                 // 疑似跳变: 只有一个同ID目标, 位置差小但yaw差大
                 handleArmorJump(candidates[0]);
             }

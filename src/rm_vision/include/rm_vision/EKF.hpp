@@ -1,5 +1,3 @@
-#ifndef EKF_9D_HPP
-#define EKF_9D_HPP
 
 #include <eigen3/Eigen/Dense>
 #include <cmath>
@@ -44,6 +42,8 @@ public:
     
     // 用于连续化观测yaw的辅助函数
     static double shortestAngularDistance(double from, double to);
-};
 
-#endif
+    Eigen::MatrixXd numericalJacobian(const Eigen::VectorXd& x0,
+        const std::function<Eigen::Vector4d(const Eigen::VectorXd&)>& h_func,
+        double eps = 1e-6) const;
+};

@@ -362,8 +362,6 @@ private:
                     cv::putText(frame, cv::format("EKFX:%.2f Y:%.2f Yaw:%.1f", pos_c.x(), pos_c.y(), yaw_est*180/M_PI),
                                 cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX,
                                 0.5, cv::Scalar(0,255,255), 1);*/
-
-                    tool_.drawVehicleCenter(frame, pos_c);
                 }
             }
 
@@ -371,7 +369,8 @@ private:
             cv::putText(frame, "YOLO+EKF", cv::Point(10, frame.rows - 20),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 1);
             cv::imshow("Armor Detection", frame);
-            if (cv::waitKey(1) == 27) {
+            if (cv::waitKey(1) == 27) 
+            {
                 rclcpp::shutdown();
             }
         }
