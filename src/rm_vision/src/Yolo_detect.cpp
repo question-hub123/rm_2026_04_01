@@ -1,6 +1,5 @@
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
-#include <rclcpp/subscription.hpp>
 #include <string>
 #include <vector>
 #include <opencv2/opencv.hpp>
@@ -63,6 +62,17 @@ public:
             "serial_data", 10,
             std::bind(&ArmorDetctor::sub_callback, this, std::placeholders::_1));
 
+        sub_filtered_ = this->create_subscription<armor_interfaces::msg::ArmorArray>(
+            "armor_msgs_filtered", 10,
+            [this](const armor_interfaces::msg::ArmorArray::SharedPtr msg) {
+                filtered_vehicle_centers_.clear();
+                for (const auto& arm : msg->armors) {
+                    // arm.x, arm.y, arm.z 已经是车体中心（世界系）
+                    filtered_vehicle_centers_.push_back(
+                        Eigen::Vector3d(arm.x, arm.y, arm.z));
+                }
+            });
+
         // 定时器：按视频帧率驱动
         double fps = cap_.get(cv::CAP_PROP_FPS);
         if (fps <= 0) fps = 30.0;
@@ -97,6 +107,9 @@ private:
     // 云台角度（弧度）
     std::atomic<double> gimbal_yaw_{0.0};
     std::atomic<double> gimbal_pitch_{0.0};
+
+    std::vector<Eigen::Vector3d> filtered_vehicle_centers_; // 用于可视化历史车体中心轨迹
+    rclcpp::Subscription<armor_interfaces::msg::ArmorArray>::SharedPtr sub_filtered_;
 
     // 目标跟踪与 EKF
     struct TrackedTarget
@@ -253,9 +266,14 @@ private:
             if (!tt.ekf_initialized) {
                 tt.ekf->init(pos_obs, yaw_obs);
                 tt.ekf_initialized = true;
-            } else {
-                Eigen::Vector4d z;
-                z << pos_obs.x(), pos_obs.y(), pos_obs.z(), yaw_obs;
+            } else 
+            {
+                double dist = pos_obs.norm();
+                double target_yaw   = std::atan2(pos_obs.y(), pos_obs.x());
+                double target_pitch = std::atan2(pos_obs.z(), std::sqrt(pos_obs.x()*pos_obs.x() + pos_obs.y()*pos_obs.y()));
+                double armor_yaw    = yaw_obs;
+                
+                Eigen::Vector4d z(target_yaw, target_pitch, dist, armor_yaw);
                 tt.ekf->update(z);
             }
 
@@ -315,7 +333,6 @@ private:
             }
 
             armor_array_msg.armors.push_back(armor_msg);
-            if(detections.empty()) { armor_array_msg.armors.clear(); }
         }
 
         pub_->publish(armor_array_msg);
@@ -363,6 +380,10 @@ private:
                                 cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX,
                                 0.5, cv::Scalar(0,255,255), 1);*/
                 }
+            }
+            for(const auto& center_world : filtered_vehicle_centers_) {
+                 tool_.drawVehicleCenter(frame, center_world);
+                 RCLCPP_INFO(this->get_logger(),"Vehicle center: [%.2f, %.2f, %.2f]", center_world.x(), center_world.y(), center_world.z());
             }
 
             // 显示推理耗时（大致 fps）

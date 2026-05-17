@@ -18,13 +18,13 @@ EKF::EKF() : initialized_(false) {
 
     // 测量噪声协方差 (初始值，可根据实际情况调整)
     R.setIdentity();
-    R.diagonal() << 0.01, 0.01, 0.1, 0.01;
+    R.diagonal() << 0.01, 0.01, 0.2, 0.1;
 }
 
 void EKF::init(const Eigen::Vector3d& p_armor, double armor_yaw, double r0) {
     x.setZero();
-    x(0) = p_armor.x() + r0 * cos(armor_yaw);
-    x(2) = p_armor.y() + r0 * sin(armor_yaw);
+    x(0) = p_armor.x() - r0 * cos(armor_yaw);
+    x(2) = p_armor.y() - r0 * sin(armor_yaw);
     x(4) = p_armor.z();
     x(6) = armor_yaw;
     x(8) = r0;
@@ -122,7 +122,7 @@ void EKF::update(const Eigen::Vector4d& z)
 Eigen::Vector3d EKF::getArmorPosition() const {
     double yaw = x(6);
     double r = x(8);
-    return Eigen::Vector3d(x(0) - r * cos(yaw), x(2) - r * sin(yaw), x(4));
+    return Eigen::Vector3d(x(0) + r * cos(yaw), x(2) + r * sin(yaw), x(4));
 }
 
 Eigen::Vector3d EKF::getVehiclePosition() const {

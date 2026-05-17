@@ -18,7 +18,7 @@ public:
                 detect_count_(0), lost_count_(0), last_yaw_(0.0), another_r_(0.26), dz_(0.0) {
         // 参数
         this->declare_parameter<int>("tracking_thres", 5);
-        this->declare_parameter<int>("lost_thres", 10);
+        this->declare_parameter<int>("lost_thres", 15);
         this->declare_parameter<double>("max_match_distance", 1.5);
         this->declare_parameter<double>("max_match_yaw_diff", 0.8); // rad (~45°)
         tracking_thres_ = this->get_parameter("tracking_thres").as_int();
@@ -101,8 +101,8 @@ private:
         Eigen::Vector3d pred_pos = getPredictedArmorPosition(ekf_);
         if ((cur_pos - pred_pos).norm() > max_match_distance_) {
             double r = ekf_.x(8);
-            ekf_.x(0) = cur_pos.x() + r * cos(yaw_continuous);
-            ekf_.x(2) = cur_pos.y() + r * sin(yaw_continuous);
+            ekf_.x(0) = cur_pos.x() - r * cos(yaw_continuous);
+            ekf_.x(2) = cur_pos.y() - r * sin(yaw_continuous);
             ekf_.x(4) = cur_pos.z();
             ekf_.x(6) = yaw_continuous;
             RCLCPP_WARN(this->get_logger(), "EKF diverged, reset state.");
@@ -243,20 +243,19 @@ private:
         out_msg.header = msg->header;
         armor_interfaces::msg::Armor out_armor;
         // 使用匹配到的装甲板信息，或者创建一个新的
-        if (matched) {
-            out_armor = matched_armor;
-        } else {
-            out_armor.id = tracked_id_;
-            out_armor.x = armor_pos.x();
-            out_armor.y = armor_pos.y();
-            out_armor.z = armor_pos.z();
-            out_armor.yaw = ekf_.getContinuousYaw(); // 车体连续yaw
-        }
-        out_armor.yaw_filtered = aim_yaw;
-        out_armor.pitch_filtered = aim_pitch;
-        out_armor.is_predict = !matched; // 标记是否为预测值
-        out_msg.armors.push_back(out_armor);
+        
+        // 始终发布车体中心（世界系），便于 Yolo_detect 可视化
+        Eigen::Vector3d vehicle_center = ekf_.getVehiclePosition();
+        out_armor.id              = tracked_id_;
+        out_armor.x               = vehicle_center.x();
+        out_armor.y               = vehicle_center.y();
+        out_armor.z               = vehicle_center.z();
+        out_armor.yaw             = ekf_.getContinuousYaw();   // 车体朝向
+        out_armor.yaw_filtered    = aim_yaw;                  // 瞄准角 (yaw)
+        out_armor.pitch_filtered  = aim_pitch;                // 瞄准角 (pitch)
+        out_armor.is_predict      = !matched;                 // 标记是否为预测值
 
+        out_msg.armors.push_back(out_armor);
         pub_filtered_->publish(out_msg);
 
         // 可视化
@@ -274,10 +273,11 @@ private:
                                             raw_pitch_deg, filt_pitch_deg);
         }
 
-        /*Eigen::Vector3d pred = getPredictedArmorPosition(ekf_);
+        Eigen::Vector3d pred = getPredictedArmorPosition(ekf_);
         Eigen::Vector3d obs(matched_armor.x, matched_armor.y, matched_armor.z);
-        RCLCPP_INFO(get_logger(), "pred: [%.2f,%.2f,%.2f] obs: [%.2f,%.2f,%.2f] dist: %.3f",
+        /*RCLCPP_INFO(get_logger(), "pred: [%.2f,%.2f,%.2f] obs: [%.2f,%.2f,%.2f] dist: %.3f",
                     pred.x(), pred.y(), pred.z(), obs.x(), obs.y(), obs.z(), (pred-obs).norm());*/
+        //RCLCPP_INFO(this->get_logger(),"Vehicle center: [%.2f, %.2f, %.2f]", vehicle_center.x(), vehicle_center.y(), vehicle_center.z());
 
     }
 };
