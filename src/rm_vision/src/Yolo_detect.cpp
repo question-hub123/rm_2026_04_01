@@ -25,10 +25,10 @@ public:
         // ================= 参数声明 =================
         this->declare_parameter<std::string>("model_path", "/home/aa/rm_ws/0526.onnx");
         this->declare_parameter<std::string>("device", "CPU");
-        this->declare_parameter<float>("conf_thresh", 0.65f);
+        this->declare_parameter<float>("conf_thresh", 0.80f);
         this->declare_parameter<float>("nms_thresh", 0.45f);
         this->declare_parameter<int>("detect_color", 0);
-        this->declare_parameter<std::string>("video_path", "/home/aa/vision_source/test2.mp4");
+        this->declare_parameter<std::string>("video_path", "/home/aa/vision_source/2_fast.mp4");
         this->declare_parameter<bool>("show_window", true);
 
         std::string model_path = this->get_parameter("model_path").as_string();
@@ -61,10 +61,11 @@ public:
             "armor_msgs_filtered", 10,
             [this](const armor_interfaces::msg::ArmorArray::SharedPtr msg) {
                 filtered_vehicle_centers_.clear();
-                for (const auto& arm : msg->armors) {
+                for (const auto& arm : msg->armors) 
+                {
                     // arm.x, arm.y, arm.z 已经是车体中心 (世界系)
-                    filtered_vehicle_centers_.push_back(
-                        Eigen::Vector3d(arm.x, arm.y, arm.z));
+                    filtered_vehicle_centers_.push_back(Eigen::Vector3d(arm.x, arm.y, arm.z));
+                    orientation_yaw = arm.yaw_filtered;
                 }
             });
 
@@ -100,6 +101,10 @@ private:
     std::atomic<double> gimbal_pitch_{0.0};
 
     std::vector<Eigen::Vector3d> filtered_vehicle_centers_;  // 世界系
+    double orientation_yaw;//装甲板朝向角
+
+    bool is_paused_ = false;
+    cv::Mat last_drawn_frame_;   // 存放最后一帧的绘制结果
 
     rclcpp::Time last_time_;
 
@@ -111,6 +116,28 @@ private:
 
     void timer_callback()
     {
+        if (is_paused_) 
+        {
+            if (!last_drawn_frame_.empty()) 
+            {
+                cv::Mat paused_display = last_drawn_frame_.clone();
+                cv::putText(paused_display, "PAUSED", cv::Point(10, 30),
+                            cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(0, 0, 255), 2);
+                cv::imshow("Armor Detection", paused_display);
+            }
+            int key = cv::waitKey(1);
+            if (key == 32) 
+            {          // 空格键 → 恢复播放
+                is_paused_ = false;
+            } 
+            else if (key == 27) 
+            {   // ESC → 退出
+                rclcpp::shutdown();
+            }
+            return;
+        }
+
+
         cv::Mat frame;
         cap_ >> frame;
         if (frame.empty()) {
@@ -125,41 +152,47 @@ private:
 
         // ===================== YOLO 检测 + PnP 解算 =====================
         auto armors = detector_->detect(frame);
+        
 
         struct Detection {
             cv::Point2f corners[4];
             double x, y, z;       // 世界系坐标 (m)
-            double yaw, pitch;    // 世界系姿态角 (rad)
+            double yaw, pitch, roll;    // 世界系姿态角 (rad)
             int number;
         };
+
         std::vector<Detection> detections;
+        /*double pitch_est = 4.0 * M_PI / 180.0; // 约15度俯视
+        Eigen::Quaterniond q_imu = Eigen::AngleAxisd(0.0, Eigen::Vector3d::UnitZ())
+                         * Eigen::AngleAxisd(pitch_est, Eigen::Vector3d::UnitY());*/
+
+        Eigen::Quaterniond q_imu = Eigen::Quaterniond::Identity();
 
         for (const auto &armor : armors) {
             cv::Point2f vertices[4];
             armor.rect.points(vertices);
 
-            std::vector<cv::Point2f> image_points = {
-                vertices[0], vertices[3], vertices[2], vertices[1]
-            };
+            std::vector<cv::Point2f> raw_points(vertices, vertices + 4);
+            std::vector<cv::Point2f> image_points = tool_.orderPoints(raw_points);
 
             cv::Mat rvec, tvec;
             double yaw_rad, pitch_rad, distance;
             if (pnp_solver_->solveWithPose(image_points, rvec, tvec, yaw_rad, pitch_rad, distance)) {
                 Detection det;
-                for (int k = 0; k < 4; ++k) det.corners[k] = vertices[k];
+                for (int k = 0; k < 4; ++k) det.corners[k] = image_points[k];
 
-                // 世界系坐标
                 Eigen::Vector3d pos_cam(tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2));
-                Eigen::Vector3d pos_world = tool_.cameraToWorld(pos_cam, gimbal_yaw_.load(), gimbal_pitch_.load());
+                Eigen::Vector3d pos_world = tool_.cameraToWorld(pos_cam, q_imu);
+
                 det.x = pos_world.x();
                 det.y = pos_world.y();
                 det.z = pos_world.z();
 
-                // 世界系姿态
-                double world_yaw, world_pitch;
-                tool_.cameraNormalToWorld(rvec, gimbal_yaw_.load(), gimbal_pitch_.load(), world_yaw, world_pitch);
+                double world_yaw, world_pitch, world_roll;
+                tool_.cameraNormalToWorld(rvec, q_imu, world_yaw, world_pitch, world_roll);
                 det.yaw   = world_yaw;
                 det.pitch = world_pitch;
+                det.roll  = world_roll;
                 det.number = armor.number;
                 detections.push_back(det);
             }
@@ -178,11 +211,16 @@ private:
             armor_msg.z               = det.z;
             armor_msg.yaw             = det.yaw;
             armor_msg.pitch           = det.pitch;
-            // 滤波字段留空或设为原始值（后续由 EKF_node 填充）
-            armor_msg.yaw_filtered    = det.yaw;
+
+            armor_msg.yaw_filtered    = det.roll;//懒得改信息包了，先对付一下
             armor_msg.pitch_filtered  = det.pitch;
             armor_msg.is_predict      = false;
             armor_array_msg.armors.push_back(armor_msg);
+
+            double cx = det.x + 0.37 * sin(det.yaw);
+            double cy = det.y + 0.37 * cos(det.yaw); 
+            double cz = det.z;
+            //tool_.drawVehicleCenter(frame, Eigen::Vector3d(cx, cy, cz), q_imu);
         }
         pub_->publish(armor_array_msg);
 
@@ -191,30 +229,40 @@ private:
             // 1. 绘制检测结果
             for (const auto& det : detections) {
                 // 画四边形
+                int num = 0;
                 for (int k = 0; k < 4; ++k)
+                {
                     cv::line(frame, det.corners[k], det.corners[(k+1)%4], cv::Scalar(0,255,0), 2);
+                    cv::putText(frame, std::to_string(num++), det.corners[k], cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0,255,0), 2);
+                }
                 cv::Point2f center = (det.corners[0] + det.corners[2]) / 2.0f;
                 cv::putText(frame, "Num:" + std::to_string(det.number), center,
                             cv::FONT_HERSHEY_SIMPLEX, 1.2, cv::Scalar(0,255,0), 3);
 
                 double dist_m = std::sqrt(det.x*det.x + det.y*det.y + det.z*det.z);
-                cv::putText(frame, cv::format("Dist:%.2fm", dist_m),
-                            center + cv::Point2f(-80, 20), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0,0,255), 2);
-                cv::putText(frame, cv::format("Y:%.1f P:%.1f", det.yaw*180/M_PI, det.pitch*180/M_PI),
-                            center + cv::Point2f(-80, 45), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255,255,0), 2);
+                //cv::putText(frame, cv::format("Dist:%.2fm", dist_m),
+                            //center + cv::Point2f(-80, 20), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0,0,255), 2);
+                //cv::putText(frame, cv::format("Y:%.1f P:%.1f R:%.1f", det.yaw*180/M_PI, det.pitch*180/M_PI, det.roll*180/M_PI),
+                            //center + cv::Point2f(-80, 45), cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255,255,0), 2);
             }
 
-            // 2. 绘制滤波后的车体中心 (来自 EKF_node)
-            for (const auto& center_world : filtered_vehicle_centers_) {
-                tool_.drawVehicleCenter(frame, center_world,0,0);
+            // 2. 绘制滤波后的车体中心 (来自 EKF_node）
+            Eigen::Vector3d test = Eigen::Vector3d(2.16, -0.07, -0.11);
+            for (const auto& center_world : filtered_vehicle_centers_) 
+            {
+                tool_.drawVehicleCenter(frame, center_world, q_imu);
             }
 
             // 3. 帧信息
             cv::putText(frame, "YOLO + EKF (remote)", cv::Point(10, frame.rows - 20),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 1);
             cv::imshow("Armor Detection", frame);
-            if (cv::waitKey(1) == 27) {
+            int key = cv::waitKey(15);
+            if (key == 27) {         // ESC → 退出
                 rclcpp::shutdown();
+            } else if (key == 32) {  // 空格 → 暂停
+                is_paused_ = true;
+                last_drawn_frame_ = frame.clone();   // 保存绘制好的帧
             }
         }
     }

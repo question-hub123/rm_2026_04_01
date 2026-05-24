@@ -1,167 +1,218 @@
+// ekf11.cpp
 #include "EKF.hpp"
+#include <cmath>
+#include <algorithm>
 
-EKF::EKF() : initialized_(false) {
+EKF11::EKF11() : armor_num_(4), last_id_(0), update_count_(0), converged_(false) {
     x.setZero();
-    P = Eigen::Matrix<double, 10, 10>::Identity() * 1.0;
-    F = Eigen::Matrix<double, 10, 10>::Identity();
-    H.setZero();
-
-    // 过程噪声协方差 Q
-    Q.setIdentity();
-    // xc, vxc, yc, vyc, zc, vzc, yaw, vyaw, r, zp
-    Q.diagonal() << 0.01, 0.001,  // x
-                    0.01, 0.001,  // y
-                    0.01, 0.001,  // z
-                    0.02, 0.2,  // yaw
-                    1e-6,      // r  (半径变化极小)
-                    1e-6;      // zp (装甲板高度偏移变化极小)
-
-    // 测量噪声协方差 R (极其重要)
-    // 观测维度: [yaw_cam, pitch_cam, distance, orientation_yaw]
-    R.setIdentity();
-    // 策略：极度信任位置系观测(yaw_cam, pitch_cam, dist)，极度不信任PnP的单帧姿态(orientation_yaw)
-    R.diagonal() << 0.001, 0.001, 4.0, 0.005; 
+    P = Eigen::Matrix<double, 11, 11>::Identity() * 100.0;
 }
 
-void EKF::init(const Eigen::Vector3d& p_armor, double armor_yaw, double r0, double zp0) {
-    x.setZero();
-    // 根据装甲板位置和初始半径推算车体中心
-    x(0) = p_armor.x() - r0 * cos(armor_yaw); // xc
-    x(2) = p_armor.y() - r0 * sin(armor_yaw); // yc
-    x(4) = p_armor.z() - zp0;                 // zc
-    
-    x(6) = armor_yaw; // yaw
-    x(8) = r0;        // r
-    x(9) = zp0;       // zp
+void EKF11::init(const Eigen::Vector3d& p_armor_world,
+                 double orientation_yaw,
+                 int armor_num,
+                 double init_r,
+                 double init_l,
+                 double init_h,
+                 const Eigen::Matrix<double, 11, 1>& P0_diag)
+{
+    armor_num_ = armor_num;
+    last_id_ = 0;
+    update_count_ = 0;
+    converged_ = false;
 
-    initialized_ = true;
+    // 从装甲板中心反算旋转中心
+    double cx = p_armor_world(0) + init_r * std::cos(orientation_yaw);
+    double cy = p_armor_world(1) + init_r * std::sin(orientation_yaw);
+    double cz = p_armor_world(2);
+
+    x << cx, 0.0, cy, 0.0, cz, 0.0, orientation_yaw, 0.0, init_r, init_l, init_h;
+    P = P0_diag.asDiagonal();
 }
 
-void EKF::predict(double dt) {
-    if (!initialized_ || dt <= 0.0) return;
+void EKF11::predict(double dt) {
+    if (dt <= 0.0) return;
 
-    // 状态转移: 匀速运动模型
-    x(0) += x(1) * dt; // xc += vxc*dt
-    x(2) += x(3) * dt; // yc += vyc*dt
-    x(4) += x(5) * dt; // zc += vzc*dt
-    x(6) += x(7) * dt; // yaw += vyaw*dt (连续变化)
-
-    // 半径 r 和高度偏移 zp 保持不变
-
-    // 更新雅可比矩阵 F
-    F.setIdentity();
+    // 状态转移矩阵 F (11x11) —— 匀速模型
+    Eigen::Matrix<double, 11, 11> F = Eigen::Matrix<double, 11, 11>::Identity();
     F(0, 1) = dt;
     F(2, 3) = dt;
     F(4, 5) = dt;
     F(6, 7) = dt;
 
+    // 分段白噪声过程噪声协方差 Q
+    double v1 = 300.0;   // 加速度方差
+    double v1_z = 0.01;
+    double v2 = 500.0;    // 角加速度方差
+    double a = dt * dt * dt * dt / 4.0;
+    double b = dt * dt * dt / 2.0;
+    double c = dt * dt;
+
+    Eigen::Matrix<double, 11, 11> Q = Eigen::Matrix<double, 11, 11>::Zero();
+    auto setBlock = [&](int i, double av) {
+        Q(i, i)     = a * av;  Q(i, i+1)   = b * av;
+        Q(i+1, i)   = b * av;  Q(i+1, i+1) = c * av;
+    };
+    setBlock(0, v1);  // x, vx
+    setBlock(2, v1);  // y, vy
+    setBlock(4, v1_z);  // z, vz
+    setBlock(6, v2);  // yaw, vyaw
+    // r, l, h 的噪声为 0
+
+    // 状态预测（带角度归一化）
+    Eigen::Matrix<double, 11, 1> x_pred = F * x;
+    x_pred(6) = limitRad(x_pred(6));
+
+    x = x_pred;
     P = F * P * F.transpose() + Q;
 }
 
-void EKF::update(const Eigen::Vector4d& z) 
-{
-    if (!initialized_) return;
-
-    // 预测观测 h(x) -> [yaw_cam, pitch_cam, dist, orientation_yaw]
-    auto h_func = [](const Eigen::VectorXd& x_val) -> Eigen::Vector4d {
-        double xc_v  = x_val(0);
-        double yc_v  = x_val(2);
-        double zc_v  = x_val(4);
-        double yv    = x_val(6); // 正在追踪的装甲板的连续yaw
-        double rr    = x_val(8); // 半径
-        double zp_v  = x_val(9); // 高度偏移
-
-        // 测算装甲板坐标 (世界系下，但因为最终转球面，相对原点)
-        double xa_v = xc_v + rr * cos(yv);
-        double ya_v = yc_v + rr * sin(yv);
-        double za_v = zc_v + zp_v;
-
-        double dxy = sqrt(xa_v * xa_v + ya_v * ya_v);
-        double dd  = sqrt(xa_v * xa_v + ya_v * ya_v + za_v * za_v);
-        
-        Eigen::Vector4d zz;
-        zz(0) = atan2(ya_v, xa_v); // 球面坐标系偏航角
-        zz(1) = atan2(za_v, dxy);  // 球面坐标系俯仰角
-        zz(2) = dd;                // 距离
-        zz(3) = yv;                // 装甲板自身朝向
-        return zz;
-    };
-
-    Eigen::Vector4d z_pred = h_func(x);
-    H = numericalJacobian(x, h_func);
-
-    // 卡方检验
-    Eigen::Matrix4d S = H * P * H.transpose() + R;
-    Eigen::Vector4d y_res = z - z_pred;
-    
-    // 角度残差必须归一化到 [-pi, pi]
-    y_res(0) = normalizeAngle(y_res(0));
-    y_res(1) = normalizeAngle(y_res(1));
-    y_res(3) = normalizeAngle(y_res(3));
-
-    double mahalanobis = y_res.transpose() * S.inverse() * y_res;
-    const double chi2_threshold = 80; // 4 自由度，99% 置信度
-    if (mahalanobis > chi2_threshold) {
-        // 残差过大，可能是误检或跳变，放弃本次更新
-        return;
+void EKF11::update(const Eigen::Vector4d& z_obs, const Eigen::Vector3d& armor_xyz) {
+    // ---------- 装甲板 ID 匹配 ----------
+    int best_id = 0;
+    double min_error = 1e10;
+    for (int i = 0; i < armor_num_; ++i) {
+        double angle = limitRad(x(6) + i * 2.0 * M_PI / armor_num_);
+        Eigen::Vector3d pred_xyz = hArmorXyz(x, i);
+        Eigen::Vector3d pred_ypd = xyz2ypd(pred_xyz);
+        double err = std::abs(limitRad(z_obs(3) - angle))
+                   + std::abs(limitRad(z_obs(0) - pred_ypd(0)));
+        if (err < min_error) 
+        {
+            min_error = err;
+            best_id = i;
+        }
     }
+    last_id_ = best_id;
+    update_count_++;
 
-    // 卡尔曼增益
-    Eigen::Matrix<double, 10, 4> K = P * H.transpose() * S.inverse();
-    x += K * y_res;
-    P = (Eigen::Matrix<double, 10, 10>::Identity() - K * H) * P;
+    // ---------- 观测噪声 R (动态) ----------
+    double center_yaw = std::atan2(armor_xyz(1), armor_xyz(0));
+    double delta_angle = limitRad(z_obs(3) - center_yaw);
+    double dist = armor_xyz.norm();
+    Eigen::Matrix<double, 4, 4> R = Eigen::Matrix<double, 4, 4>::Zero();
+    R(0,0) = 5e-4;//yaw 观测噪声
+    R(1,1) = 5e-4;//pitch 观测噪声
+    R(2,2) = std::log(std::abs(delta_angle) + 2.5) + 2.5;//dist 观测噪声，角度越偏离中心，距离观测越不可靠
+    R(3,3) = std::log(dist + 1.0) / 200.0 + 9e-2;//angle 观测噪声，距离越远，角度观测越不可靠
 
-    // 参数钳制保护
-    if (x(8) < 0.12) x(8) = 0.12;
-    if (x(8) > 0.45) x(8) = 0.45;
-    if (x(9) < -0.2) x(9) = -0.2;
-    if (x(9) > 0.2)  x(9) =  0.2;
+    // ---------- 解析雅可比 H ----------
+    Eigen::Matrix<double, 4, 11> H = h_jacobian(x, best_id);
+
+    // ---------- 观测残差 ----------
+    Eigen::Vector4d z_pred = h_func(x, best_id);
+    Eigen::Vector4d y = z_obs - z_pred;
+    y(0) = limitRad(y(0));
+    y(1) = limitRad(y(1));
+    y(3) = limitRad(y(3));
+
+    // ---------- EKF 更新 ----------
+    Eigen::Matrix4d S = H * P * H.transpose() + R;
+    Eigen::Matrix<double, 11, 4> K = P * H.transpose() * S.inverse();
+    Eigen::Matrix<double, 11, 1> dx = K * y;
+    x += dx;
+    x(6) = limitRad(x(6));   // 角度归一化
+    Eigen::Matrix<double, 11, 11> I = Eigen::Matrix<double, 11, 11>::Identity();
+    P = (I - K * H) * P;
+
+    // 收敛判断（简化）
+    if (update_count_ > 5 && x(8) > 0.05 && x(8) < 0.5)
+        converged_ = true;
+
 }
 
-Eigen::Vector3d EKF::getArmorPosition() const {
-    double yaw = x(6);
-    double r = x(8);
-    return Eigen::Vector3d(x(0) + r * cos(yaw), x(2) + r * sin(yaw), x(4) + x(9));
+Eigen::Vector3d EKF11::getArmorCenter(int id) const {
+    return hArmorXyz(x, id);
 }
 
-Eigen::Vector3d EKF::getVehiclePosition() const { return Eigen::Vector3d(x(0), x(2), x(4)); }
-double EKF::getArmorZOffset() const { return x(9); }
-double EKF::getRadius() const { return x(8); }
-double EKF::getContinuousYaw() const { return x(6); }
+Eigen::Vector3d EKF11::getArmorCenter() const {
+    return hArmorXyz(x, last_id_);
+}
 
-double EKF::normalizeAngle(double angle) {
+// ==================== 私有工具函数 ====================
+
+Eigen::Vector3d EKF11::hArmorXyz(const Eigen::Matrix<double, 11, 1>& state, int id) const {
+    double angle = limitRad(state(6) + id * 2.0 * M_PI / armor_num_);
+    bool use_long = (armor_num_ == 4) && (id == 1 || id == 3);
+    double r = use_long ? (state(8) + state(9)) : state(8);
+    double z = use_long ? (state(4) + state(10)) : state(4);
+    double ax = state(0) - r * std::cos(angle);
+    double ay = state(2) - r * std::sin(angle);
+    return {ax, ay, z};
+}
+
+Eigen::Vector4d EKF11::h_func(const Eigen::Matrix<double, 11, 1>& state, int id) const {
+    Eigen::Vector3d axyz = hArmorXyz(state, id);
+    Eigen::Vector3d ypd = xyz2ypd(axyz);
+    double angle = limitRad(state(6) + id * 2.0 * M_PI / armor_num_);
+    return {ypd(0), ypd(1), ypd(2), angle};
+}
+
+Eigen::Matrix<double, 4, 11> EKF11::h_jacobian(const Eigen::Matrix<double, 11, 1>& state, int id) const 
+{
+    double angle = limitRad(state(6) + id * 2.0 * M_PI / armor_num_);
+    bool use_long = (armor_num_ == 4) && (id == 1 || id == 3);
+    double r = use_long ? (state(8) + state(9)) : state(8);
+
+    // 对装甲板中心坐标的雅可比 (3x11)
+    Eigen::Matrix<double, 3, 11> H_xyz = Eigen::Matrix<double, 3, 11>::Zero();
+    H_xyz(0,0) = 1.0;
+    H_xyz(0,6) =  r * std::sin(angle);
+    H_xyz(0,8) = -std::cos(angle);
+    if (use_long) H_xyz(0,9) = -std::cos(angle);
+
+    H_xyz(1,2) = 1.0;
+    H_xyz(1,6) = -r * std::cos(angle);
+    H_xyz(1,8) = -std::sin(angle);
+    if (use_long) H_xyz(1,9) = -std::sin(angle);
+
+    H_xyz(2,4) = 1.0;
+    if (use_long) H_xyz(2,10) = 1.0;
+
+    // 球坐标转换雅可比
+    Eigen::Vector3d axyz = hArmorXyz(state, id);
+    Eigen::Matrix<double, 3, 3> J_ypd = xyz2ypdJacobian(axyz);
+
+    // 组合成最终观测雅可比 4x11
+    Eigen::Matrix<double, 4, 11> H = Eigen::Matrix<double, 4, 11>::Zero();
+    H.block<3,11>(0,0) = J_ypd * H_xyz;
+    H(3,6) = 1.0;   // 角度直接对应 yaw
+    return H;
+}
+
+// ================== 静态工具函数 ==================
+
+double EKF11::limitRad(double angle) {
     while (angle > M_PI) angle -= 2.0 * M_PI;
     while (angle < -M_PI) angle += 2.0 * M_PI;
     return angle;
 }
 
-double EKF::shortestAngularDistance(double from, double to) {
-    return normalizeAngle(to - from);
+Eigen::Vector3d EKF11::xyz2ypd(const Eigen::Vector3d& xyz) {
+    double yaw = std::atan2(xyz(1), xyz(0));
+    double pitch = std::atan2(xyz(2), std::sqrt(xyz(0)*xyz(0) + xyz(1)*xyz(1)));
+    double dist = xyz.norm();
+    return {yaw, pitch, dist};
 }
 
-Eigen::MatrixXd EKF::numericalJacobian(
-    const Eigen::VectorXd& x0,
-    const std::function<Eigen::Vector4d(const Eigen::VectorXd&)>& h_func,
-    double eps) const 
-{
-    int n = x0.size();       
-    int m = 4;
-    Eigen::MatrixXd J(m, n);
-    Eigen::VectorXd x_pert = x0;
-    for (int i = 0; i < n; ++i) {
-        x_pert(i) += eps;
-        Eigen::Vector4d h_plus = h_func(x_pert);
-        x_pert(i) -= 2.0 * eps;
-        Eigen::Vector4d h_minus = h_func(x_pert);
-        x_pert(i) += eps; 
-        
-        // 注意处理角度的跃变
-        Eigen::Vector4d diff = h_plus - h_minus;
-        diff(0) = normalizeAngle(diff(0));
-        diff(1) = normalizeAngle(diff(1));
-        diff(3) = normalizeAngle(diff(3));
-        
-        J.col(i) = diff / (2.0 * eps);
-    }
+Eigen::Matrix<double, 3, 3> EKF11::xyz2ypdJacobian(const Eigen::Vector3d& xyz) {
+    double x = xyz(0), y = xyz(1), z = xyz(2);
+    double dxy2 = x*x + y*y;
+    double dxy = std::sqrt(dxy2);
+    double d = xyz.norm();
+    double d2 = d*d;
+
+    Eigen::Matrix<double, 3, 3> J;
+    J(0,0) = -y / dxy2;
+    J(0,1) =  x / dxy2;
+    J(0,2) = 0.0;
+
+    J(1,0) = -x*z / (d2 * dxy);
+    J(1,1) = -y*z / (d2 * dxy);
+    J(1,2) = dxy / d2;
+
+    J(2,0) = x / d;
+    J(2,1) = y / d;
+    J(2,2) = z / d;
     return J;
 }
