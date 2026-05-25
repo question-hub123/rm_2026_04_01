@@ -69,6 +69,9 @@ public:
     static Eigen::Vector3d xyz2ypd(const Eigen::Vector3d& xyz);
     static Eigen::Matrix<double, 3, 3> xyz2ypdJacobian(const Eigen::Vector3d& xyz);
 
+    Eigen::Vector3d predictFutureCenter(double dt) const;
+    Eigen::Vector3d predictFutureArmor(int id, double dt) const;
+
 private:
     int armor_num_;      // 装甲板数量
     int last_id_;        // 上一帧匹配到的 id

@@ -12,7 +12,7 @@
 
 #include "OpenvinoInfer.h"
 #include "Pnp.hpp"
-#include "Tool.hpp"
+#include "yolo_tool.hpp"
 
 using namespace std::chrono_literals;
 
@@ -29,7 +29,7 @@ public:
         this->declare_parameter<float>("conf_thresh", 0.80f);
         this->declare_parameter<float>("nms_thresh", 0.45f);
         this->declare_parameter<int>("detect_color", 0);
-        this->declare_parameter<std::string>("video_path", "/home/aa/vision_source/2_fast.mp4");
+        this->declare_parameter<std::string>("video_path", "/home/aa/vision_source/move.mp4");
         this->declare_parameter<bool>("show_window", true);
 
         std::string model_path = this->get_parameter("model_path").as_string();
@@ -68,7 +68,7 @@ public:
                     // arm.x, arm.y, arm.z 已经是车体中心 (世界系)
                     filtered_vehicle_centers_.push_back(Eigen::Vector3d(arm.x, arm.y, arm.z));
                     orientation_yaw.push_back(arm.yaw);
-                    V_yaw.push_back(arm.yaw_filtered); // 这里我们把 EKF 输出的角速度 Vyaw 存在了 yaw_filtered 字段里
+                    R.push_back(arm.yaw_filtered); // 这里我们把 EKF 输出的角速度 R 存在了 yaw_filtered 字段里
 
                 }
             });
@@ -93,7 +93,7 @@ private:
     rclcpp::Subscription<armor_interfaces::msg::Serial>::SharedPtr sub_;
     rclcpp::Subscription<armor_interfaces::msg::ArmorArray>::SharedPtr sub_filtered_;
     rclcpp::TimerBase::SharedPtr timer_;
-    Tool tool_;
+    Yolo_Tool tool_;
 
     cv::VideoCapture cap_;
     bool show_window_;
@@ -106,7 +106,7 @@ private:
 
     std::vector<Eigen::Vector3d> filtered_vehicle_centers_;  // 世界系
     std::vector<double> orientation_yaw;//装甲板朝向角
-    std::vector<double> V_yaw;//装甲板朝向角速度
+    std::vector<double> R;//装甲板半径 r（用 EKF 输出的 yaw_filtered 字段传递）
 
     bool is_paused_ = false;
     cv::Mat last_drawn_frame_;   // 存放最后一帧的绘制结果
@@ -257,13 +257,13 @@ private:
             {
                 Eigen::Vector3d center_world = filtered_vehicle_centers_[i];
                 double yaw = orientation_yaw[i];
-                double Vyaw = V_yaw[i];
+                double r = R[i];
                 double delay_s = 0.04;
 
                 //yaw += Vyaw * delay_s; // 预测短时间后的朝向，补偿系统延迟
                 
                 tool_.drawVehicleCenter(frame, center_world, q_imu);
-                tool_.drawAllArmors(frame, center_world, yaw, q_imu);
+                tool_.drawAllArmors(frame, center_world, yaw, q_imu, r);
             }
             // 3. 帧信息
             cv::putText(frame, "YOLO + EKF (remote)", cv::Point(10, frame.rows - 20),

@@ -234,17 +234,12 @@ private:
             double aim_yaw = std::atan2(armor_center.y(), armor_center.x());
             double aim_pitch = std::atan2(armor_center.z(), std::sqrt(armor_center.x()*armor_center.x() + armor_center.y()*armor_center.y()));
 
-            /*aim_armor.id             = best_track->id;
-            aim_armor.x              = armor_center.x();
-            aim_armor.y              = armor_center.y();
-            aim_armor.z              = armor_center.z();*/
-
             aim_armor.x              = best_track->ekf.x(0);
             aim_armor.y              = best_track->ekf.x(2);
             aim_armor.z              = best_track->ekf.x(4);
 
             aim_armor.yaw            = best_track->ekf.getYaw();      // 旋转角度
-            aim_armor.yaw_filtered   = aim_yaw;                      // 预测击打 yaw
+            aim_armor.yaw_filtered   = best_track->ekf.x(8);          //用这个字段传装甲板半径 r，懒得改信息包了
             aim_armor.pitch_filtered = aim_pitch;                    // 预测击打 pitch
             aim_armor.is_predict     = false;
             out_msg.armors.push_back(aim_armor);
