@@ -41,9 +41,9 @@ void EKF11::predict(double dt) {
     F(6, 7) = dt;
 
     // 分段白噪声过程噪声协方差 Q
-    double v1 = 300.0;   // 加速度方差
+    double v1 = 1000.0;   // 加速度方差
     double v1_z = 0.01;
-    double v2 = 500.0;    // 角加速度方差
+    double v2 = 800.0;    // 角加速度方差
     double a = dt * dt * dt * dt / 4.0;
     double b = dt * dt * dt / 2.0;
     double c = dt * dt;

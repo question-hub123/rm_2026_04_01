@@ -23,4 +23,11 @@ def generate_launch_description():
     kalman_node = Node(package="rm_vision", executable="EKFilter_node")
     serial_node = Node(package="rm_vision",executable="serial_node")
 
-    return LaunchDescription([armor_detect_node, kalman_node])
+    rviz2 = Node(
+        package="rviz2",
+        executable="rviz2",
+        arguments=["-d", "/home/aa/rm_ws/src/rm_vision/config/ekf_display.rviz"],
+        output="screen"
+    )
+
+    return LaunchDescription([armor_detect_node, kalman_node, rviz2])

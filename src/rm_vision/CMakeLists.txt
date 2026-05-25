@@ -15,6 +15,8 @@ find_package(armor_interfaces REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(serial_driver REQUIRED)
 find_package(OpenVINO REQUIRED COMPONENTS Runtime)
+find_package(visualization_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 include_directories(
   include
@@ -85,6 +87,8 @@ ament_target_dependencies(
   "rclcpp"
   "OpenCV"
   "armor_interfaces"
+  "visualization_msgs"
+  "geometry_msgs"
 )
 
 # 【关键】直接链接绝对路径的库文件

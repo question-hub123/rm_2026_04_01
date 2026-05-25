@@ -333,9 +333,22 @@ public:
     }
 
     
-    void drawAllArmors(cv::Mat& img, const Eigen::Vector3d& vehicle_center_world,
-                       double vehicle_yaw_world, double radius, double zp_offset, 
-                       int current_face, double gimbal_yaw, double gimbal_pitch) const
+    /**
+     * @brief 根据滤波后的车体中心和车体朝向，重投影绘制 4 块装甲板
+     * @param img 画面
+     * @param center_world EKF算出的车体中心坐标
+     * @param vehicle_yaw EKF算出的车体偏航角(连续yaw)
+     * @param q_imu IMU四元数
+     * @param radius 旋转半径(默认0.26)
+     */
+    /**
+     * @brief 根据滤波后的车体中心和车体朝向，重投影绘制 4 块装甲板
+     */
+    void drawAllArmors(cv::Mat& img, 
+                       const Eigen::Vector3d& center_world, 
+                       double vehicle_yaw, 
+                       const Eigen::Quaterniond& q_imu, 
+                       double radius = 0.26) const 
     {
         const double ARMOR_W = 0.135;
         const double ARMOR_H = 0.055;
@@ -345,35 +358,46 @@ public:
             0.0,        1296.23028, 509.49319,
             0.0,        0.0,        1.0);
 
-        Eigen::Matrix3d R_gimbal2world = get_R_gimbal2world(gimbal_yaw, gimbal_pitch);
+        Eigen::Matrix3d R_camera2gimbal;
+        R_camera2gimbal << 0,  0,  1,
+                        -1,  0,  0,
+                         0, -1,  0;
+
+        Eigen::Matrix3d R_gimbal2world = q_imu.toRotationMatrix();
         Eigen::Matrix3d R_world2gimbal = R_gimbal2world.transpose();
+        Eigen::Matrix3d R_gimbal2camera = R_camera2gimbal.transpose();
 
         for (int i = 0; i < 4; ++i) {
-            double face_yaw = vehicle_yaw_world + i * (CV_PI / 2.0);
+            // face_yaw 是第 i 块装甲板的【向内法向】
+            double face_yaw = vehicle_yaw + i * (M_PI / 2.0);
 
+            // 1. 装甲板中心 = 车体中心 - r * 向内法向
             Eigen::Vector3d board_center_world;
-            board_center_world.x() = vehicle_center_world.x() + radius * std::cos(face_yaw);
-            board_center_world.y() = vehicle_center_world.y() + radius * std::sin(face_yaw);
-            board_center_world.z() = vehicle_center_world.z() + zp_offset;
+            board_center_world.x() = center_world.x() - radius * std::cos(face_yaw);
+            board_center_world.y() = center_world.y() - radius * std::sin(face_yaw);
+            board_center_world.z() = center_world.z();
 
-            Eigen::Vector3d w_vec(-std::sin(face_yaw) * (ARMOR_W / 2.0), 
-                                   std::cos(face_yaw) * (ARMOR_W / 2.0), 
-                                   0.0);
-            Eigen::Vector3d h_vec(0.0, 0.0, ARMOR_H / 2.0);
+            // 2. 计算装甲板的右向和上向向量
+            // 因为向内法向是 (cos, sin, 0)，那么向外法向就是 (-cos, -sin, 0)
+            // 右向向量 = 向外法向 叉乘 上方向(0,0,1) = (-sin, cos, 0)
+            Eigen::Vector3d right_vec(-std::sin(face_yaw) * (ARMOR_W / 2.0), 
+                                       std::cos(face_yaw) * (ARMOR_W / 2.0), 
+                                       0.0);
+            Eigen::Vector3d up_vec(0.0, 0.0, ARMOR_H / 2.0);
 
+            // 3. 计算四个角点
             std::vector<Eigen::Vector3d> corners_world = {
-                board_center_world - w_vec + h_vec,
-                board_center_world + w_vec + h_vec,
-                board_center_world + w_vec - h_vec,
-                board_center_world - w_vec - h_vec
+                board_center_world - right_vec + up_vec, // 左上
+                board_center_world + right_vec + up_vec, // 右上
+                board_center_world + right_vec - up_vec, // 右下
+                board_center_world - right_vec - up_vec  // 左下
             };
 
+            // 4. 投影到像素坐标
             std::vector<cv::Point2f> img_pts;
             bool valid = true;
             for (const auto& pt_w : corners_world) {
-                Eigen::Vector3d pt_g = R_world2gimbal * pt_w;
-                Eigen::Vector3d pt_c(-pt_g.y(), -pt_g.z(), pt_g.x());
-
+                Eigen::Vector3d pt_c = R_gimbal2camera * (R_world2gimbal * pt_w);
                 if (pt_c.z() <= 0.1) {
                     valid = false;
                     break;
@@ -383,11 +407,12 @@ public:
                 img_pts.push_back(cv::Point2f(u, v));
             }
 
+            // 5. 绘制
             if (valid) {
-                cv::Scalar color = (i == current_face) ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 0, 0);
-                int thickness = (i == current_face) ? 3 : 2;
+                // 主目标画红色，其余画青色
+                cv::Scalar color = (i == 0) ? cv::Scalar(0, 0, 255) : cv::Scalar(255, 255, 0);
                 for (int j = 0; j < 4; ++j) {
-                    cv::line(img, img_pts[j], img_pts[(j+1)%4], color, thickness, cv::LINE_AA);
+                    cv::line(img, img_pts[j], img_pts[(j+1)%4], color, 2, cv::LINE_AA);
                 }
             }
         }

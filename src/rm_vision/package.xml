@@ -13,6 +13,8 @@
   <depend>OpenCV</depend>
   <depend>armor_interfaces</depend>
   <depend>serial_driver</depend>
+  <depend>visualization_msgs</depend>
+  <depend>geometry_msgs</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
