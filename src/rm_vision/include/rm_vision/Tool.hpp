@@ -293,8 +293,105 @@ public:
         return R_gimbal2world;
     }
 
+    void drawVehicleCenter(cv::Mat& img, const Eigen::Vector3d& center_world, const Eigen::Quaterniond& q_imu) const 
+    {
+        // 标定矩阵（与 cameraToWorld 新版本完全一致）
+        Eigen::Matrix3d R_camera2gimbal;
+        R_camera2gimbal << 0,  0,  1,
+                        -1,  0,  0,
+                        0, -1,  0;
+        Eigen::Vector3d t_camera2gimbal(0, 0, 0);   // 可后续标定填充
+        Eigen::Matrix3d R_gimbal2imubody = Eigen::Matrix3d::Identity();
+
+        // 1. 世界 → 云台
+        Eigen::Matrix3d R_imu2world = q_imu.toRotationMatrix();
+        Eigen::Matrix3d R_gimbal2world = R_imu2world * R_gimbal2imubody.transpose();
+        Eigen::Vector3d center_gimbal = R_gimbal2world.transpose() * center_world;
+
+        // 2. 云台 → 相机（手眼标定逆变换）
+        Eigen::Vector3d center_cam = R_camera2gimbal.transpose() * (center_gimbal - t_camera2gimbal);
+
+        // 3. 相机内参投影
+        cv::Mat K = (cv::Mat_<double>(3,3) <<
+            1296.16167, 0.0,        643.60901,
+            0.0,        1296.23028, 509.49319,
+            0.0,        0.0,        1.0);
+
+        if (center_cam.z() <= 0.1) return;
+
+        double fx = K.at<double>(0,0);
+        double fy = K.at<double>(1,1);
+        double cx = K.at<double>(0,2);
+        double cy = K.at<double>(1,2);
+        double u = fx * center_cam.x() / center_cam.z() + cx;
+        double v = fy * center_cam.y() / center_cam.z() + cy;
+
+        cv::Point2f px(static_cast<float>(u), static_cast<float>(v));
+        cv::circle(img, px, 8, cv::Scalar(0, 0, 255), -1);
+        cv::putText(img, "CarCtr", px + cv::Point2f(10, -10),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 0, 255), 2);
+    }
 
     
+    void drawAllArmors(cv::Mat& img, const Eigen::Vector3d& vehicle_center_world,
+                       double vehicle_yaw_world, double radius, double zp_offset, 
+                       int current_face, double gimbal_yaw, double gimbal_pitch) const
+    {
+        const double ARMOR_W = 0.135;
+        const double ARMOR_H = 0.055;
+
+        const cv::Mat K = (cv::Mat_<double>(3,3) <<
+            1296.16167, 0.0,        643.60901,
+            0.0,        1296.23028, 509.49319,
+            0.0,        0.0,        1.0);
+
+        Eigen::Matrix3d R_gimbal2world = get_R_gimbal2world(gimbal_yaw, gimbal_pitch);
+        Eigen::Matrix3d R_world2gimbal = R_gimbal2world.transpose();
+
+        for (int i = 0; i < 4; ++i) {
+            double face_yaw = vehicle_yaw_world + i * (CV_PI / 2.0);
+
+            Eigen::Vector3d board_center_world;
+            board_center_world.x() = vehicle_center_world.x() + radius * std::cos(face_yaw);
+            board_center_world.y() = vehicle_center_world.y() + radius * std::sin(face_yaw);
+            board_center_world.z() = vehicle_center_world.z() + zp_offset;
+
+            Eigen::Vector3d w_vec(-std::sin(face_yaw) * (ARMOR_W / 2.0), 
+                                   std::cos(face_yaw) * (ARMOR_W / 2.0), 
+                                   0.0);
+            Eigen::Vector3d h_vec(0.0, 0.0, ARMOR_H / 2.0);
+
+            std::vector<Eigen::Vector3d> corners_world = {
+                board_center_world - w_vec + h_vec,
+                board_center_world + w_vec + h_vec,
+                board_center_world + w_vec - h_vec,
+                board_center_world - w_vec - h_vec
+            };
+
+            std::vector<cv::Point2f> img_pts;
+            bool valid = true;
+            for (const auto& pt_w : corners_world) {
+                Eigen::Vector3d pt_g = R_world2gimbal * pt_w;
+                Eigen::Vector3d pt_c(-pt_g.y(), -pt_g.z(), pt_g.x());
+
+                if (pt_c.z() <= 0.1) {
+                    valid = false;
+                    break;
+                }
+                float u = K.at<double>(0,0) * pt_c.x() / pt_c.z() + K.at<double>(0,2);
+                float v = K.at<double>(1,1) * pt_c.y() / pt_c.z() + K.at<double>(1,2);
+                img_pts.push_back(cv::Point2f(u, v));
+            }
+
+            if (valid) {
+                cv::Scalar color = (i == current_face) ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 0, 0);
+                int thickness = (i == current_face) ? 3 : 2;
+                for (int j = 0; j < 4; ++j) {
+                    cv::line(img, img_pts[j], img_pts[(j+1)%4], color, thickness, cv::LINE_AA);
+                }
+            }
+        }
+    }
 
     // 旧版 cameraToWorld (使用 yaw/pitch)
     Eigen::Vector3d cameraToWorld(const Eigen::Vector3d& pos_cam, double curr_yaw, double curr_pitch) 
@@ -335,4 +432,54 @@ public:
         world_pitch = std::asin(n_world.z());
     }
 
+    // ==================== 新增接口（基于四元数） ====================
+    /**
+    * @brief 相机坐标系 → 世界坐标系（使用 IMU 四元数 + 临时标定矩阵）
+    */
+    Eigen::Vector3d cameraToWorld(const Eigen::Vector3d& pos_cam, const Eigen::Quaterniond& q_imu) const {
+        Eigen::Matrix3d R_camera2gimbal;
+        R_camera2gimbal << 0,  0,  1,
+                        -1,  0,  0,
+                         0, -1,  0;
+        Eigen::Vector3d t_camera2gimbal(0, 0, 0);
+        Eigen::Matrix3d R_gimbal2imubody = Eigen::Matrix3d::Identity();
+
+        Eigen::Vector3d p_gimbal = R_camera2gimbal * pos_cam + t_camera2gimbal;
+
+        Eigen::Matrix3d R_imu2world = q_imu.toRotationMatrix();
+        Eigen::Matrix3d R_gimbal2world = R_imu2world * R_gimbal2imubody.transpose();
+        return R_gimbal2world * p_gimbal;
+    }
+
+    /**
+    * @brief 将装甲板在相机系下的姿态（rvec）转换为世界系下的欧拉角（yaw, pitch, roll）
+    */
+    void cameraNormalToWorld(const cv::Mat& rvec,
+                            const Eigen::Quaterniond& q_imu,
+                            double& world_yaw,
+                            double& world_pitch,
+                            double& world_roll) const {
+        Eigen::Matrix3d R_camera2gimbal;
+        R_camera2gimbal << 0,  0,  1,
+                        -1,  0,  0,
+                         0, -1,  0;
+        Eigen::Matrix3d R_gimbal2imubody = Eigen::Matrix3d::Identity();
+
+        cv::Mat rmat;
+        cv::Rodrigues(rvec, rmat);
+        Eigen::Matrix3d R_armor2camera;
+        // 手动将 cv::Mat 转为 Eigen::Matrix3d
+        for (int i = 0; i < 3; ++i)
+            for (int j = 0; j < 3; ++j)
+                R_armor2camera(i, j) = rmat.at<double>(i, j);
+
+        Eigen::Matrix3d R_armor2gimbal = R_camera2gimbal * R_armor2camera;
+        Eigen::Matrix3d R_imu2world = q_imu.toRotationMatrix();
+        Eigen::Matrix3d R_gimbal2world = R_imu2world * R_gimbal2imubody.transpose();
+        Eigen::Matrix3d R_armor2world = R_gimbal2world * R_armor2gimbal;
+
+        world_yaw   = std::atan2(R_armor2world(1,0), R_armor2world(0,0));
+        world_pitch = std::asin(-R_armor2world(2,0));
+        world_roll  = std::atan2(R_armor2world(2,1), R_armor2world(2,2));
+    }
 };

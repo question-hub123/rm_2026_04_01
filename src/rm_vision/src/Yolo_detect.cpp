@@ -1,4 +1,3 @@
-#include <cstddef>
 #include <memory>
 #include <rclcpp/rclcpp.hpp>
 #include <string>
@@ -62,14 +61,11 @@ public:
             "armor_msgs_filtered", 10,
             [this](const armor_interfaces::msg::ArmorArray::SharedPtr msg) {
                 filtered_vehicle_centers_.clear();
-                orientation_yaw.clear();
                 for (const auto& arm : msg->armors) 
                 {
                     // arm.x, arm.y, arm.z 已经是车体中心 (世界系)
                     filtered_vehicle_centers_.push_back(Eigen::Vector3d(arm.x, arm.y, arm.z));
-                    orientation_yaw.push_back(arm.yaw);
-                    R.push_back(arm.yaw_filtered); // 这里我们把 EKF 输出的角速度 R 存在了 yaw_filtered 字段里
-
+                    orientation_yaw = arm.yaw_filtered;
                 }
             });
 
@@ -105,8 +101,7 @@ private:
     std::atomic<double> gimbal_pitch_{0.0};
 
     std::vector<Eigen::Vector3d> filtered_vehicle_centers_;  // 世界系
-    std::vector<double> orientation_yaw;//装甲板朝向角
-    std::vector<double> R;//装甲板半径 r（用 EKF 输出的 yaw_filtered 字段传递）
+    double orientation_yaw;//装甲板朝向角
 
     bool is_paused_ = false;
     cv::Mat last_drawn_frame_;   // 存放最后一帧的绘制结果
@@ -253,18 +248,17 @@ private:
 
             // 2. 绘制滤波后的车体中心 (来自 EKF_node）
             Eigen::Vector3d test = Eigen::Vector3d(2.16, -0.07, -0.11);
-            for(size_t i = 0; i < filtered_vehicle_centers_.size(); ++i)
+            for (const auto& center_world : filtered_vehicle_centers_) 
             {
-                Eigen::Vector3d center_world = filtered_vehicle_centers_[i];
-                double yaw = orientation_yaw[i];
-                double r = R[i];
-                double delay_s = 0.04;
-
-                //yaw += Vyaw * delay_s; // 预测短时间后的朝向，补偿系统延迟
-                
+                //手搓测试
+                double cx = center_world.x() + 0.36 * cos(-orientation_yaw);
+                double cy = center_world.y() + 0.36 * sin(-orientation_yaw);
+                double cz = center_world.z();
+                test = Eigen::Vector3d(cx, cy, cz);
                 tool_.drawVehicleCenter(frame, center_world, q_imu);
-                tool_.drawAllArmors(frame, center_world, yaw, q_imu, r);
+                //tool_.drawAllArmors(frame, center_world, orientation_yaw, q_imu);
             }
+
             // 3. 帧信息
             cv::putText(frame, "YOLO + EKF (remote)", cv::Point(10, frame.rows - 20),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 1);

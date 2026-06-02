@@ -41,9 +41,9 @@ void EKF11::predict(double dt) {
     F(6, 7) = dt;
 
     // 分段白噪声过程噪声协方差 Q
-    double v1 = 9000.0;   // 加速度方差
+    double v1 = 500.0;   // 加速度方差
     double v1_z = 0.01;
-    double v2 = 600.0;    // 角加速度方差
+    double v2 = 400.0;    // 角加速度方差
     double a = dt * dt * dt * dt / 4.0;
     double b = dt * dt * dt / 2.0;
     double c = dt * dt;
@@ -91,10 +91,10 @@ void EKF11::update(const Eigen::Vector4d& z_obs, const Eigen::Vector3d& armor_xy
     double delta_angle = limitRad(z_obs(3) - center_yaw);
     double dist = armor_xyz.norm();
     Eigen::Matrix<double, 4, 4> R = Eigen::Matrix<double, 4, 4>::Zero();
-    R(0,0) = 5e-4;//yaw 观测噪声
-    R(1,1) = 5e-4;//pitch 观测噪声
-    R(2,2) = std::log(std::abs(delta_angle) + 2.5) + 2.5;//dist 观测噪声，角度越偏离中心，距离观测越不可靠
-    R(3,3) = std::log(dist + 1.0) / 200.0 + 9e-2;//angle 观测噪声，距离越远，角度观测越不可靠
+    R(0,0) = 4e-3;
+    R(1,1) = 4e-3;
+    R(2,2) = std::log(std::abs(delta_angle) + 1.5) + 1.0;
+    R(3,3) = std::log(dist + 1.0) / 200.0 + 9e-2;
 
     // ---------- 解析雅可比 H ----------
     Eigen::Matrix<double, 4, 11> H = h_jacobian(x, best_id);
@@ -215,32 +215,4 @@ Eigen::Matrix<double, 3, 3> EKF11::xyz2ypdJacobian(const Eigen::Vector3d& xyz) {
     J(2,1) = y / d;
     J(2,2) = z / d;
     return J;
-}
-
-
-Eigen::Vector3d EKF11::predictFutureCenter(double dt) const {
-    return Eigen::Vector3d(
-        x(0) + x(1) * dt,   // xc + vx*dt
-        x(2) + x(3) * dt,   // yc + vy*dt
-        x(4) + x(5) * dt    // zc + vz*dt
-    );
-}
-
-// 返回未来 Δt 秒后指定 id 的装甲板中心世界坐标
-Eigen::Vector3d EKF11::predictFutureArmor(int id, double dt) const {
-    // 预测未来状态，仅使用位置和速度、角度和角速度
-    double xc_f = x(0) + x(1) * dt;
-    double yc_f = x(2) + x(3) * dt;
-    double zc_f = x(4) + x(5) * dt;
-    double yaw_f = limitRad(x(6) + x(7) * dt);
-
-    // 计算角度、半径和高度
-    double angle = limitRad(yaw_f + id * 2.0 * M_PI / armor_num_);
-    bool use_long = (armor_num_ == 4) && (id == 1 || id == 3);
-    double r = use_long ? (x(8) + x(9)) : x(8);
-    double z = use_long ? (zc_f + x(10)) : zc_f;
-    double ax = xc_f - r * std::cos(angle);
-    double ay = yc_f - r * std::sin(angle);
-    double az = z;
-    return {ax, ay, az};
 }

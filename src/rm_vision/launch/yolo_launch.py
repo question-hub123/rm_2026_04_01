@@ -30,4 +30,4 @@ def generate_launch_description():
         output="screen"
     )
 
-    return LaunchDescription([armor_detect_node, kalman_node, rviz2])
+    return LaunchDescription([armor_detect_node, kalman_node,rviz2])
