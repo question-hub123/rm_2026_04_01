@@ -112,6 +112,8 @@ void EKF11::update(const Eigen::Vector4d& z_obs, const Eigen::Vector3d& armor_xy
     Eigen::Matrix<double, 11, 1> dx = K * y;
     x += dx;
     x(6) = limitRad(x(6));   // 角度归一化
+    if(x(8) < 0.02) x(8) = 0.25;  // 半径下限
+
     Eigen::Matrix<double, 11, 11> I = Eigen::Matrix<double, 11, 11>::Identity();
     P = (I - K * H) * P;
 
