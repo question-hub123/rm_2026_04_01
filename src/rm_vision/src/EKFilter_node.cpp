@@ -236,13 +236,13 @@ private:
 
             aim_armor.id             = best_track->id;
             
-            /*aim_armor.x              = armor_center.x();
+            aim_armor.x              = armor_center.x();
             aim_armor.y              = armor_center.y();
-            aim_armor.z              = armor_center.z();*/
+            aim_armor.z              = armor_center.z();
 
-            aim_armor.x              = best_track->ekf.x(0);
+            /*aim_armor.x              = best_track->ekf.x(0);
             aim_armor.y              = best_track->ekf.x(2);
-            aim_armor.z              = best_track->ekf.x(4);
+            aim_armor.z              = best_track->ekf.x(4);*/
 
             aim_armor.yaw            = best_track->ekf.getYaw();      // 旋转角度
             aim_armor.yaw_filtered   = aim_yaw;                      // 预测击打 yaw

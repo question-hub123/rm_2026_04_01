@@ -91,8 +91,8 @@ void EKF11::update(const Eigen::Vector4d& z_obs, const Eigen::Vector3d& armor_xy
     double delta_angle = limitRad(z_obs(3) - center_yaw);
     double dist = armor_xyz.norm();
     Eigen::Matrix<double, 4, 4> R = Eigen::Matrix<double, 4, 4>::Zero();
-    R(0,0) = 4e-3;
-    R(1,1) = 4e-3;
+    R(0,0) = 2e-3;
+    R(1,1) = 2e-3;
     R(2,2) = std::log(std::abs(delta_angle) + 1.5) + 1.0;
     R(3,3) = std::log(dist + 1.0) / 200.0 + 9e-2;
 

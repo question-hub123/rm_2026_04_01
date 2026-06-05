@@ -28,7 +28,7 @@ public:
         this->declare_parameter<float>("conf_thresh", 0.80f);
         this->declare_parameter<float>("nms_thresh", 0.45f);
         this->declare_parameter<int>("detect_color", 0);
-        this->declare_parameter<std::string>("video_path", "/home/aa/vision_source/move.mp4");
+        this->declare_parameter<std::string>("video_path", "/home/aa/vision_source/test2.mp4");
         this->declare_parameter<bool>("show_window", true);
 
         std::string model_path = this->get_parameter("model_path").as_string();
@@ -256,14 +256,13 @@ private:
                 double cz = center_world.z();
                 test = Eigen::Vector3d(cx, cy, cz);
                 tool_.drawVehicleCenter(frame, center_world, q_imu);
-                //tool_.drawAllArmors(frame, center_world, orientation_yaw, q_imu);
             }
 
             // 3. 帧信息
             cv::putText(frame, "YOLO + EKF (remote)", cv::Point(10, frame.rows - 20),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255,255,255), 1);
             cv::imshow("Armor Detection", frame);
-            int key = cv::waitKey(10);
+            int key = cv::waitKey(1);
             if (key == 27) {         // ESC → 退出
                 rclcpp::shutdown();
             } else if (key == 32) {  // 空格 → 暂停
